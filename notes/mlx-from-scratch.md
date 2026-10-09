@@ -341,6 +341,13 @@ Reading it:
   the answer copies from the prompt; ~0 on prose / explain / code_gen. Short
   drafts (k = 2-3) beat long ones; k = 8 loses everything it gains to the
   wider verify. Same story as Track A's llama.cpp n-gram results.
+* vs Track A (llama.cpp, same draft model, `notes/llama-ngram-draft.md`):
+  their best is 10.78 tok/s (1.61x over 6.68). Ours is 19.6 tok/s (2.28x over
+  8.56). Two factors: MLX's 4-bit target decodes 28% faster (smaller file),
+  and our verify of T = 4 costs 1.04x a decode step with k = 3, where
+  llama.cpp drafts up to 16 tokens (`n16 p0.7`) and has a different verify
+  curve. Per prompt our lead is largest on prose/explain (14.1/17.4 vs
+  7.4/7.2 tok/s), where llama.cpp's speculation barely helps.
 * The hybrid (free n-gram drafts when the context has a long match) doesn't
   add anything over the draft model: on code_edit the 0.8B already predicts
   the copied spans, and drafting costs only ~13% of a round.
