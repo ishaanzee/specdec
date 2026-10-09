@@ -256,6 +256,10 @@ def main():
             matches = texts[0] == b
             if not matches:
                 diverge = next((i for i, (x, y) in enumerate(zip(texts[0], b)) if x != y), min(len(b), len(texts[0])))
+                if not a.no_write:  # keep the differing output for inspection
+                    md = ROOT / "results" / "mismatch_outputs" / a.experiment
+                    md.mkdir(parents=True, exist_ok=True)
+                    (md / f"{a.method}__{a.config_name}__{p['id']}.txt").write_text(texts[0])
         dn = med([r["draft_n"] for r in rs])
         da = med([r["draft_accepted"] for r in rs])
         rf = refs[p["id"]]

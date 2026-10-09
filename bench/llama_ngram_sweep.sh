@@ -46,5 +46,36 @@ case "${1:-}" in
     B draft-simple  q35-2b-n4    1 --paired -- --spec-type draft-simple -md $D2 -ngld all --spec-draft-n-max 4
     B draft-simple,ngram-simple q35-0.8b-n3+ngs-n6-m16 1 --paired -- --spec-type draft-simple,ngram-simple -md $D08 -ngld all --spec-draft-n-max 3 --spec-ngram-simple-size-n 6 --spec-ngram-simple-size-m 16
     ;;
+  draft2)
+    B draft-simple  q35-0.8b-n8-p0.7  1 --paired -- --spec-type draft-simple -md $D08 -ngld all --spec-draft-n-max 8 --spec-draft-p-min 0.7
+    B draft-simple  q35-0.8b-n12-p0.5 1 --paired -- --spec-type draft-simple -md $D08 -ngld all --spec-draft-n-max 12 --spec-draft-p-min 0.5
+    B draft-simple  q35-0.8b-n16-p0.7 1 --paired -- --spec-type draft-simple -md $D08 -ngld all --spec-draft-n-max 16 --spec-draft-p-min 0.7
+    B draft-simple  q35-2b-n8-p0.5    1 --paired -- --spec-type draft-simple -md $D2 -ngld all --spec-draft-n-max 8 --spec-draft-p-min 0.5
+    B draft-simple,ngram-simple q35-0.8b-n8-p0.5+ngs-n6-m16 1 --paired -- --spec-type draft-simple,ngram-simple -md $D08 -ngld all --spec-draft-n-max 8 --spec-draft-p-min 0.5 --spec-ngram-simple-size-n 6 --spec-ngram-simple-size-m 16
+    ;;
+  draft3)
+    B draft-simple  q35-0.8b-n24-p0.7 1 --paired -- --spec-type draft-simple -md $D08 -ngld all --spec-draft-n-max 24 --spec-draft-p-min 0.7
+    B draft-simple  q35-0.8b-n16-p0.8 1 --paired -- --spec-type draft-simple -md $D08 -ngld all --spec-draft-n-max 16 --spec-draft-p-min 0.8
+    B draft-simple  q35-0.8b-n32-p0.8 1 --paired -- --spec-type draft-simple -md $D08 -ngld all --spec-draft-n-max 32 --spec-draft-p-min 0.8
+    B draft-simple,ngram-simple q35-0.8b-n16-p0.7+ngs-n6-m16 1 --paired -- --spec-type draft-simple,ngram-simple -md $D08 -ngld all --spec-draft-n-max 16 --spec-draft-p-min 0.7 --spec-ngram-simple-size-n 6 --spec-ngram-simple-size-m 16
+    ;;
+  final)
+    # re-run the best paired draft config (by mean speedup over all paired rows) with 2 more repeats
+    BEST=$(.venv/bin/python - <<'PY'
+import json, statistics, collections
+g = collections.defaultdict(list)
+for l in open("results/llama-ngram-draft.jsonl"):
+    r = json.loads(l)
+    if "speedup" in r and r["repeat"] == 1:
+        g[(r["method"], r["config"], tuple(r["server_args"]))].append(r["speedup"])
+best = max((k for k in g if len(g[k]) == 6), key=lambda k: statistics.mean(g[k]))
+print(best[0], best[1], " ".join(best[2]).replace("'", ""))
+PY
+)
+    echo "final: $BEST"
+    set -- $BEST
+    method=$1; cfg=$2; shift 2
+    B "$method" "$cfg-final" 2 --paired -- "$@"
+    ;;
   *) echo "unknown phase"; exit 1;;
 esac
