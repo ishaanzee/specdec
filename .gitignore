@@ -1,0 +1,5 @@
+.venv/
+logs/
+models/
+*.gguf
+__pycache__/
