@@ -6,7 +6,26 @@ Raw rows: `results/llama-ngram-draft.jsonl`. Tables: `.venv/bin/python bench/lla
 
 ## TL;DR
 
-__TLDR__
+* **Best: Qwen3.5-0.8B (Q8_0) as a classic draft model, `--spec-draft-n-max 16 --spec-draft-p-min 0.7`:
+  10.78 tok/s mean vs 6.68 no-spec in paired runs = 1.61x** (3 runs, spread < 0.3%). Per prompt:
+  code_edit 2.28x (15.2 tok/s), code_gen 1.98x, math 1.67x, summarize 1.55x, prose 1.12x, explain 1.07x.
+  No prompt got slower. 82% of drafted tokens accepted.
+* Output: 5/6 prompts byte-identical to the no-spec baseline. `math` differs from character 55 on
+  (`### 1. Identify the Given Information` vs `### Step 1: Determine the head start...`), the same alternate text
+  (identical sha) in every draft-model config with n-max >= 4 and with both 0.8B and 2B drafts. It's a near-tie
+  token that flips when the target evaluates a multi-token batch instead of one token (float differences in
+  batched verification, as the README warned). Not a draft-model bug: the draft never decides the output.
+* The `p-min` gate is the knob that matters. Without it (`n-max 5, p-min 0`) the same draft model gives 1.00x mean
+  and makes prose/explain 33% *slower*; reason below (rejections are expensive on this hybrid model).
+* n-gram drafting alone is close to useless here: the best (`ngram-simple`, defaults) gives 1.18x on code_edit and
+  ~1.0x elsewhere (1.03x mean). ngram-mod with defaults barely drafts; ngram-cache drafts constantly and loses.
+  When an n-gram method drafts nothing it costs nothing (exactly baseline speed).
+* Tokenizer: Qwen3.5-0.8B/2B/4B are token-for-token compatible with Qwen3.8 for text (identical BPE vocab, merges,
+  pre-tokenizer and chat special tokens; only 7 audio/TTS added tokens are missing from the old tokenizer.json, and
+  the GGUF vocabularies are identical). llama.cpp accepted the draft without any warning or translation.
+* Qwen3.5-2B is a worse draft than 0.8B (1.26x vs 1.39x at the same settings): +3 points acceptance doesn't pay
+  for 2.5x the draft cost. Combining draft-simple with ngram-simple (`--spec-type draft-simple,ngram-simple`
+  works in this build) gave no gain (1.38x vs 1.39x).
 
 ## Method
 
@@ -116,7 +135,10 @@ Compare rows within this table only loosely; the paired table below is the relia
 ### Phase 2: paired runs (`speedup` vs a no-spec run of the same prompt right next to it)
 
 The first two paired rows (`q35-0.8b-n3`, `ngram-simple n6-m16`) ran while the machine was heavily loaded
-(reference ~3.6 tok/s); the rest ran on a quiet machine (reference 6.6-6.7 tok/s).
+(reference ~3.6 tok/s), and `ngram-mod defaults` straddled the load dropping away (prose ref 6.46 vs candidate 5.43
+is that transition, not ngram-mod; it drafted nothing on prose). Everything from `ngram-simple defaults` on ran on a
+quiet machine (reference 6.6-6.7 tok/s). `-final` = the best config re-run twice more (n = 2, medians; per-run
+spread < 0.3%).
 
 | method | config | n | code_edit | code_gen | summarize | prose | explain | math | mean | accept | match |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -128,12 +150,71 @@ The first two paired rows (`q35-0.8b-n3`, `ngram-simple n6-m16`) ran while the m
 | draft-simple | q35-0.8b-n8-p0.5 | 1 | 12.46 (1.91x) | 11.23 (1.69x) | 8.85 (1.32x) | 7.46 (1.12x) | 6.17 (0.94x) | 9.28 (1.39x) | 9.24 (1.39x) | 959/1385 (69%) | math differ |
 | draft-simple | q35-2b-n4 | 1 | 7.78 (1.17x) | 7.13 (1.07x) | 6.22 (0.94x) | 4.21 (0.63x) | 4.94 (0.74x) | 6.71 (1.01x) | 6.16 (0.93x) | 946/1491 (63%) | math differ |
 | draft-simple,ngram-simple | q35-0.8b-n3+ngs-n6-m16 | 1 | 10.74 (1.62x) | 9.21 (1.38x) | 6.84 (1.03x) | 5.83 (0.87x) | 5.70 (0.85x) | 8.06 (1.32x) | 7.73 (1.18x) | 839/1580 (53%) | all |
+| draft-simple | q35-0.8b-n8-p0.7 | 1 | 12.32 (1.85x) | 11.72 (1.75x) | 9.62 (1.44x) | 7.46 (1.12x) | 7.11 (1.06x) | 10.16 (1.52x) | 9.73 (1.46x) | 900/1071 (84%) | math differ |
+| draft-simple | q35-0.8b-n12-p0.5 | 1 | 13.83 (2.07x) | 12.17 (1.83x) | 9.31 (1.39x) | 7.47 (1.13x) | 6.15 (0.92x) | 10.10 (1.51x) | 9.84 (1.48x) | 981/1568 (63%) | math differ |
+| draft-simple | q35-0.8b-n16-p0.7 | 1 | 15.28 (2.29x) | 13.26 (1.99x) | 10.40 (1.56x) | 7.38 (1.11x) | 7.14 (1.07x) | 11.20 (1.68x) | 10.78 (1.61x) | 932/1133 (82%) | math differ |
+| draft-simple | q35-2b-n8-p0.5 | 1 | 10.77 (1.61x) | 9.63 (1.44x) | 8.78 (1.32x) | 6.53 (0.98x) | 6.30 (0.94x) | 8.40 (1.26x) | 8.40 (1.26x) | 1032/1442 (72%) | math differ |
+| draft-simple,ngram-simple | q35-0.8b-n8-p0.5+ngs-n6-m16 | 1 | 12.99 (1.95x) | 11.23 (1.68x) | 8.10 (1.22x) | 7.53 (1.13x) | 6.28 (0.94x) | 9.26 (1.39x) | 9.23 (1.38x) | 939/1533 (61%) | math differ |
+| draft-simple | q35-0.8b-n16-p0.7-final | 2 | 15.22 (2.28x) | 13.26 (1.98x) | 10.39 (1.55x) | 7.46 (1.12x) | 7.16 (1.07x) | 11.18 (1.67x) | 10.78 (1.61x) | 932.0/1133.0 (82%) | math differ |
 
+__DRAFT3__
 
 ## What worked / dead ends
 
-__FINDINGS__
+Worked:
+* **Small-Qwen draft model + confidence gate.** Going from `n-max 5, p-min 0` (1.00x) to `n-max 8, p-min 0.5`
+  (1.39x), `n-max 8, p-min 0.7` (1.46x), `n-max 12, p-min 0.5` (1.48x) and `n-max 16, p-min 0.7` (1.61x).
+  With p-min the draft stops as soon as the 0.8B model is unsure, so drafts are long where text is predictable
+  (code: 213/253 accepted on code_edit) and short or absent where it isn't (prose: 76 tokens drafted in 256).
+  Higher p-min lowers the drafted-token count but raises acceptance (82-84% at 0.7 vs 63-69% at 0.5); on this
+  model fewer, surer drafts win because of the replay cost.
+* Paired measurement. Without it, the night's background load (no-spec speed drifting 3.6 -> 6.7 tok/s) would
+  have made every phase-1 configuration look 10-25% slower than baseline.
+
+Dead ends / small effects:
+* **n-gram methods** (all five types this build has, plus a small sweep):
+  * `ngram-simple` defaults (n12, m48): code_edit 1.18x, everything else 0.97-1.01x. Smaller keys (n4/n6, m16) draft
+    more often but accept less (22-31%); screening showed no gain over defaults outside code_edit, and paired
+    n6-m16 measured 1.07x mean / 1.21x code_edit under heavy load.
+  * `ngram-mod` defaults (match 24, n-min 48, n-max 64): only drafts when 48+ tokens can be chained from the hash
+    pool, i.e. long verbatim copies; it drafted on code_edit only (41/64 accepted, 1.18x). Lowering n-min/n-max for
+    a dense model (16/4/16, 24/8/32) still drafted only on code_edit (47/48 and 40/64 accepted); no gain.
+  * `ngram-map-k`, `ngram-map-k4v`: same matches as ngram-simple on code_edit (52/96 accepted), nothing elsewhere.
+  * `ngram-cache`: drafts on every prompt at 0-40% acceptance (0/165 on prose) and was the slowest in screening.
+  * `summarize` was supposed to be an n-gram case, but the model paraphrases; quoted spans are too short for
+    12-token keys and with 4-6 token keys acceptance is 17-31%. Only `code_edit` (the model rewrites a script it
+    was given) benefits, and only modestly: the rewrite changes enough lines that matches break often.
+* **Qwen3.5-2B draft:** n4/p0 0.93x, n8/p0.5 1.26x. Always below 0.8B at the same settings.
+* **draft + ngram combination:** with `draft-simple,ngram-simple` the n-gram draft takes precedence whenever it has
+  one, and those drafts are worse than the 0.8B model's. n3 combo 1.18x; n8/p0.5 combo 1.38x vs 1.39x alone.
+* The `math` near-tie flip appears in every draft-model config except n-max 3 runs; n-gram configs matched
+  everything (they rarely draft at that point in the text).
+
+Not tried: Qwen3.5-4B (draft cost would be ~5x the 0.8B's; the 2B result says the trend is the wrong way);
+`--spec-draft-n-min`; draft KV cache types; `-lcs/-lcd` static lookup caches for ngram-cache.
+
+For the other tracks:
+* `draft-mtp` / `draft-dflash` get per-token recurrent snapshots (`n_rs_seq = n_max`), so a partial rejection is
+  cheap for them; `draft-simple` and `ngram-*` get a full state snapshot + restore + re-decode of the accepted
+  tokens on every partial rejection. That's why p-min matters so much here, and it's an inherent advantage for
+  MTP/DFlash on this hybrid model.
+* The draft model GGUF must come from the Qwen3.5 family; the vocab check is strict (token text for every id) and
+  passes for ggml-org/Qwen3.5-0.8B-GGUF and unsloth/Qwen3.5-2B-GGUF.
+* Use `--paired` in `bench/llama_bench.py` while the machine is shared.
 
 ## Best command line
 
-__BEST__
+```bash
+hf download ggml-org/Qwen3.5-0.8B-GGUF Qwen3.5-0.8B-Q8_0.gguf     # 0.8 GB
+
+llama-server \
+  -m  ~/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snapshots/efbb3b1f70a21d97fd4495240648405f7228554f/Qwen3.8-27B-Q4_K_M.gguf \
+  -md ~/.cache/huggingface/hub/models--ggml-org--Qwen3.5-0.8B-GGUF/snapshots/8fea620810c4afa23dd6443f999a48574c1611a3/Qwen3.5-0.8B-Q8_0.gguf \
+  -ngl 999 -ngld all -fa on -c 8192 -t 6 -np 1 \
+  --spec-type draft-simple --spec-draft-n-max 16 --spec-draft-p-min 0.7
+```
+
+Send `chat_template_kwargs: {"enable_thinking": false}` (or start the server with
+`--chat-template-kwargs '{"enable_thinking": false}'`) to get the non-thinking numbers above. Measured: 10.8 tok/s
+mean generation over the 6 prompts (15.2 on code rewriting, 7.2-7.5 on prose/explanations) vs 6.7 without
+speculation; prompt processing unchanged; ~1 GB extra memory for the draft model and its context.
