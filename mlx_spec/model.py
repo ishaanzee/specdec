@@ -94,17 +94,25 @@ class SpecModel:
         return ForwardOutput(tokens, logits[0], h[0], normed[0])
 
     def prefill(self, tokens: mx.array, cache: List, step: int = 2048) -> ForwardOutput:
-        """Process a prompt in chunks; returns the output of the last chunk.
+        """Process a prompt in chunks.
 
-        Every chunk is committed in full and evaluated, so no rollback
-        information is kept alive for the prompt.
+        Returns a ``ForwardOutput`` whose ``tokens``/``hidden``/``normed``
+        cover the whole prompt (hidden-state drafters need every row) and
+        whose ``logits`` are those of the last chunk only (only ``logits[-1]``
+        is used). Every chunk is committed in full and evaluated, so no
+        rollback information is kept alive for the prompt.
         """
-        out = None
+        outs = []
         for s in range(0, tokens.size, step):
             out = self.forward(tokens[s : s + step], cache)
             self.commit(cache, out.tokens.size)
-            mx.eval(out.logits, out.hidden, [c.state for c in cache])
-        return out
+            mx.eval(out.logits, out.hidden, out.normed, [c.state for c in cache])
+            outs.append(out)
+        if len(outs) == 1:
+            return outs[0]
+        cat = lambda xs: mx.concatenate(xs, axis=0)
+        return ForwardOutput(cat([o.tokens for o in outs]), outs[-1].logits,
+                             cat([o.hidden for o in outs]), cat([o.normed for o in outs]))
 
     # -------------------------------------------------------------- rollback
     def commit(self, cache: List, n_keep: int, last: ForwardOutput | None = None):

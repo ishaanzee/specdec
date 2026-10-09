@@ -11,6 +11,9 @@ scripts/gpu.py .venv/bin/python -m mlx_spec generate --config draft:k=3 --prompt
 scripts/gpu.py .venv/bin/python -m mlx_spec bench --configs greedy ngram:k=3 draft:k=3 --repeat 2
 scripts/gpu.py .venv/bin/python -m mlx_spec verify-cost
 scripts/gpu.py .venv/bin/python -m pytest tests/test_tiny.py -q                       # seconds
+.venv/bin/python scripts/extract_mtp.py                                              # once: MTP weights -> models/mtp-mlx/
+SPECDEC_CPU=1 .venv/bin/python -m pytest tests/test_mtp_tiny.py -q                    # MTP cache sync, CPU
+scripts/gpu.py .venv/bin/python -m mlx_spec bench --configs mtp:k=3:vocab=65536
 .venv/bin/python -m pytest tests/test_sampling.py -q                                  # CPU only, 2 min
 .venv/bin/python -m mlx_spec summary                                                  # results table
 SPECDEC_27B=1 scripts/gpu.py .venv/bin/python -m pytest tests/test_equivalence_27b.py -q -s
@@ -20,7 +23,8 @@ SPECDEC_27B=1 scripts/gpu.py .venv/bin/python -m pytest tests/test_equivalence_2
 |---|---|
 | `gdn.py` | `RollbackGDN` (wraps each gated-delta layer), `LinearCache` (its rewindable cache), the per-token-state capture kernel |
 | `model.py` | `SpecModel`: `forward(tokens, cache) -> ForwardOutput(logits, hidden, normed)`, `prefill`, `commit(cache, n_keep)` |
-| `drafters.py` | `Drafter` protocol, `NgramDrafter`, `DraftModelDrafter` (optionally adaptive k), `HybridDrafter`, `NoDrafter`, `MTPDrafter` plan |
+| `drafters.py` | `Drafter` protocol, `NgramDrafter`, `DraftModelDrafter` (optionally adaptive k), `HybridDrafter`, `NoDrafter` |
+| `mtp.py` | Qwen3.8's MTP layer: `MTPHead`, `load_mtp_head` (weights from `scripts/extract_mtp.py`), `MTPDrafter` (best: `mtp:k=3:vocab=65536`, 2.69x) |
 | `decode.py` | `greedy_generate` (baseline), `speculative_generate` (the loop) |
 | `bench.py` | results rows in the shared schema, verify-cost curve, mismatch diagnosis |
 
@@ -59,5 +63,5 @@ class MyDrafter:
 hidden states for every verified position, computed in the verify pass at no
 extra cost; rows `0..n_accepted` are committed. That's what MTP / EAGLE /
 DFlash heads consume. Then register it in `bench.Runner.make_drafter` so the
-CLI and benchmark can use it (`--configs mtp:k=2`). `MTPDrafter` in
-`drafters.py` has the concrete plan for Qwen3.8's MTP layer.
+CLI and benchmark can use it (`--configs mtp:k=2`). `mtp.MTPDrafter` is a
+worked example (hidden-state conditioned, own KV cache trimmed at commit).

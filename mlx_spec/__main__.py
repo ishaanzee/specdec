@@ -12,6 +12,9 @@ Config strings: ``method[:key=value]...``
   ngram[:k=8][:n=2-4][:rollback=replay|capture|reforward]
   draft[:k=4][:model=mlx-community/Qwen3.5-0.8B-MLX-4bit][:kmin=2][:rollback=..]
   hybrid[:k=3][:n=3-4]            n-gram when it matches, else the draft model
+  mtp[:k=2][:bits=4|8|16][:hidden=normed|hidden][:vocab=N|path.json]   Qwen3.8's own MTP layer
+                                  (vocab=N: draft only from the N lowest ids + special tokens)
+  mtp-hybrid[:k=2][:n=3-4][:bits=..]   n-gram when it matches, else MTP
   any spec config [:temp=0.7]     exact speculative sampling instead of greedy
 """
 

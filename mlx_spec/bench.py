@@ -65,6 +65,19 @@ def config_name(cfg: Dict[str, str]) -> str:
     return "_".join(f"{k}{v}" for k, v in cfg.items() if k != "method") or "default"
 
 
+def accept_by_pos(hist):
+    """Conditional acceptance per draft position from a histogram of rounds by
+    number of accepted drafts: P(draft j accepted | drafts 1..j-1 accepted).
+    Only exact when every round drafted the same k (fixed-k drafters)."""
+    if not hist:
+        return None
+    out = []
+    for j in range(1, len(hist)):
+        reached = sum(hist[j - 1 :])
+        out.append(round(sum(hist[j:]) / reached, 4) if reached else None)
+    return out
+
+
 # ------------------------------------------------------------------- runner
 class Runner:
     """Holds the target (and draft models) for one locked benchmark session."""
@@ -79,6 +92,15 @@ class Runner:
         self.spec = SpecModel(self.model)
         self.eos = eos_ids(self.tokenizer)
         self.drafts = {}
+        self.mtp_heads = {}
+
+    def mtp_head(self, bits: int):
+        if bits not in self.mtp_heads:
+            from .mtp import load_mtp_head
+
+            self.mtp_heads = {}  # one at a time
+            self.mtp_heads[bits] = load_mtp_head(self.spec.lm.args, bits=bits)
+        return self.mtp_heads[bits]
 
     def draft_model(self, name):
         if name not in self.drafts:
@@ -101,6 +123,17 @@ class Runner:
             d = DraftModelDrafter(self.draft_model(name), name=name, k_min=k_min,
                                   temperature=float(cfg.get("temp", 0.0)))
             if m == "draft":
+                return d
+            lo, hi = (int(x) for x in cfg.get("n", "3-4").split("-"))
+            return HybridDrafter(NgramDrafter(n_max=hi, n_min=lo), d)
+        if m in ("mtp", "mtp-hybrid"):
+            from .mtp import MTPDrafter, load_vocab_subset
+
+            vocab = (load_vocab_subset(f"first:{cfg['vocab']}") if cfg.get("vocab", "").isdigit()
+                     else load_vocab_subset(cfg["vocab"]) if "vocab" in cfg else None)
+            d = MTPDrafter(self.spec, self.mtp_head(int(cfg.get("bits", 4))),
+                           hidden=cfg.get("hidden", "normed"), vocab=vocab)
+            if m == "mtp":
                 return d
             lo, hi = (int(x) for x in cfg.get("n", "3-4").split("-"))
             return HybridDrafter(NgramDrafter(n_max=hi, n_min=lo), d)
@@ -171,6 +204,7 @@ class Runner:
                     "rounds": r0.rounds,
                     "tokens_per_round": round(r0.n_gen / r0.rounds, 3) if r0.rounds else None,
                     "accept_hist": r0.accept_hist or None,
+                    "accept_by_pos": accept_by_pos(r0.accept_hist),
                     "repeat": repeat,
                     "runs": [{"gen_tok_s": round(r.gen_tok_s, 3), "gen_s": round(r.gen_s, 3)} for r in runs],
                     "model": tag,
@@ -192,7 +226,8 @@ class Runner:
                 print(f"[{cfg['method']}/{row['config']}] {p['id']:<10} gen {row['gen_tok_s']:.2f} tok/s "
                       f"n={r0.n_gen}{acc} match={matches}", flush=True)
             if write:
-                out = ROOT / "results" / f"mlx_{cfg['method']}.jsonl"
+                fname = "mtp" if cfg["method"].startswith("mtp") else cfg["method"]
+                out = ROOT / "results" / f"mlx_{fname}.jsonl"
                 with open(out, "a") as f:
                     for row in rows:
                         f.write(json.dumps(row) + "\n")
@@ -339,7 +374,7 @@ def summary_table(paths=None) -> str:
     for path in paths:
         for line in open(path):
             r = json.loads(line)
-            if "prompt_id" in r:  # skip verify-cost / qmm-curve rows
+            if "prompt_id" in r and "method" in r:  # skip verify-cost / qmm-curve / diagnosis rows
                 rows[(r["method"], r["config"], r["prompt_id"])] = r
     groups = OrderedDict()
     for (m, c, _), r in rows.items():

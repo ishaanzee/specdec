@@ -1,13 +1,16 @@
 # Track B: speculative decoding from scratch in MLX
 
-**Summary.** Our own MLX loop with **Qwen3.5-0.8B (4-bit) as the draft model, k = 3**
-generates at **19.6 tok/s** mean over the six prompts, **2.28x** our MLX greedy
-baseline (8.56 tok/s) and ~2.9x llama.cpp's plain decode (6.5-6.7 tok/s on the
-same prompts, Track A). Prompt lookup (n-gram) alone gives 1.17x. Rollback of
+**Summary.** Best config: **Qwen3.8's own MTP layer as the drafter, k = 3,
+drafting from the 65,536 lowest token ids**: **23.0 tok/s** mean over the six
+prompts, **2.69x** our MLX greedy baseline (8.57 tok/s), 18% faster than the
+Qwen3.5-0.8B draft model (19.6 tok/s, 2.28x) and ~3.4x llama.cpp's plain decode
+(Track A, 6.65 tok/s); with the full vocabulary MTP k = 3 gives 21.4 (2.50x).
+Prompt lookup (n-gram) alone gives 1.17x. Rollback of
 the hybrid cache costs ~3.5 ms per partially accepted round (~3% of a verify
 pass) with the `replay` strategy. Greedy outputs equal plain greedy
-token-for-token in float32; in bf16, 13 of 24 prompt x config runs diverge at
-one-ulp logit ties (diagnosed one by one), never with a clear margin.
+token-for-token in float32 (all drafters incl. MTP); in bf16 4 of 6 prompts
+diverge at the same one-ulp logit ties for every drafter (diagnosed one by
+one), never with a clear margin. MTP details: section "MTP drafter" below.
 
 Code: `mlx_spec/` (README there). mlx-lm 0.32.0 supplies the model definition
 (`mlx_lm/models/qwen3_5.py`), weights, tokenizer and cache classes; the decode
@@ -277,12 +280,7 @@ optional `draft_probs()` for sampling. `out` is the verify pass's
   tokens it skipped).
 * **Adaptive k** (`DraftModelDrafter(k_min=...)`): k += 1 after a fully
   accepted round, -1 after a fully rejected one.
-* **MTP** (`MTPDrafter`): plan only, in the class docstring. The 4-bit
-  mlx-community checkpoint has no `mtp.*` tensors (its index has 0 of them, and
-  mlx-lm's `sanitize` drops them anyway); `Qwen/Qwen3.8-27B` (bf16, now in the
-  HF cache) has 15: `mtp.fc`, `mtp.pre_fc_norm_{embedding,hidden}`,
-  `mtp.layers.0.*` (one full-attention layer + MLP), `mtp.norm`. The verify
-  pass already returns the target hidden states it needs.
+* **MTP** (`mtp.MTPDrafter`): Qwen3.8's own MTP layer, see "MTP drafter" below.
 
 ## Results
 
@@ -355,6 +353,197 @@ Reading it:
   52-93 tok/s depending on length); the draft model's own prefill costs
   ~2% of it.
 
+
+## MTP drafter (Qwen3.8's own multi-token-prediction layer)
+
+Code: `mlx_spec/mtp.py` (`MTPHead`, `load_mtp_head`, `MTPDrafter`),
+`scripts/extract_mtp.py`, `tests/test_mtp_tiny.py`, `bench/mlx_mtp_explore.py`,
+`bench/mlx_mtp_session.py`. Rows: `results/mlx_mtp.jsonl` (diagnoses:
+`results/mlx_mtp_diagnose.jsonl`). CLI: `--configs mtp:k=3:vocab=65536`,
+options `bits=4|8|16`, `hidden=normed|hidden`, `vocab=N|ids.json`, and
+`mtp-hybrid:k=3[:n=3-4]` (n-gram when it finds a >= 3-token match, else MTP).
+
+### Weights
+
+`mlx-community/Qwen3.8-27B-4bit` has no `mtp.*` tensors. `scripts/extract_mtp.py`
+reads the bf16 checkpoint's safetensors index, finds the 15 `mtp.*` tensors (all
+in shard 18) and reads only their byte ranges (0.85 GB, a few seconds, no 54 GB
+load), adds 1 to every RMSNorm weight (stored zero-centred: `Qwen3_5RMSNorm`
+scales by `1 + w`; mlx-lm's `sanitize` and llama.cpp's converter do the same,
+the latter for `enorm`/`hnorm` too; raw means -0.46 / -0.16 for
+`pre_fc_norm_{embedding,hidden}` confirm it), and writes
+`models/mtp-mlx/mtp.safetensors` (+ `config.json`; gitignored). The head is
+quantized at load time (`bits=4` default: affine, group 64, like the target),
+so 4/8/16-bit variants need only the one file. Embedding and lm_head are
+shared with the target (`mtp_use_dedicated_embeddings: false`), i.e. we use the
+target's 4-bit ones.
+
+### Architecture as implemented
+
+Reference: llama.cpp `llama_model_qwen35::graph_mtp` (`src/models/qwen35.cpp`)
+and `common_speculative_impl_draft_mtp` (`common/speculative.cpp`) at
+b29c606e2, which agree with vLLM's `Qwen3NextMTP`.
+
+```
+e   = pre_fc_norm_embedding(embed_tokens(x[i+1]))   # shared 4-bit embedding
+h   = pre_fc_norm_hidden(H[i])                       # H[i] = target hidden after x[i], AFTER the final norm
+z   = fc(concat([e, h]))                              # 10240 -> 5120, order (embedding, hidden)
+z   = DecoderLayer(z)                                 # one Qwen3.5 FULL-attention layer: gated q (q_proj -> 2x),
+                                                      #   q/k RMSNorm, partial RoPE (64 of 256 dims), SwiGLU MLP 17408
+g   = mtp.norm(z)                                     # "h_nextn"
+p(x[i+2]) = lm_head(g)                                # shared 4-bit lm_head
+```
+
+* It is mlx-lm's own `qwen3_5.DecoderLayer` built with a full-attention
+  `layer_idx`, so it has a plain `KVCache` (no recurrent state; nothing to
+  replay).
+* Hidden input: the post-final-norm state (`ForwardOutput.normed`), as
+  llama.cpp (`t_h_nextn` is taken after `output_norm`) and vLLM do. The
+  pre-norm residual (`hidden=hidden`) gives the same acceptance within noise
+  (0.636 vs 0.636 at k = 3 on 3 prompts), presumably because `hnorm`
+  renormalizes it anyway; we keep the reference.
+* Chaining for k > 1: step j + 1 feeds `g` of step j as the hidden and the
+  token drafted at step j, at the next position (llama.cpp's mode for a
+  single-head MTP: `h_row` + `pos0 + i + 1`).
+* MTP KV cache: one entry per committed pair `(H[i], x[i+1])`, RoPE position
+  = cache offset (llama.cpp puts pair i at position i + 1; a constant shift is
+  invisible to RoPE attention). The prompt's L - 1 pairs are filled in
+  `start()` from the prefill's hidden states (`SpecModel.prefill` now returns
+  the hidden states of every chunk). Per round: `draft(last, k)` runs ONE MTP
+  pass over the pending committed pairs from the last round (n + 1 rows: the
+  accepted drafts plus `(H[last-1], last)`), whose last row gives draft 1,
+  then k - 1 chained single-row passes. `commit(out, n)` trims the k - 1
+  chained entries (they were built from the MTP's own `g`, not the target's
+  hidden, so they are wrong even when accepted) and queues `out.normed[:n+1]`
+  with `out.tokens[1:n+1]` as the next pending pairs. Rounds drafted by
+  someone else (k = 0, or the n-gram in `mtp-hybrid`) just accumulate
+  pending rows. Everything is lazy: drafting and the verify pass are one
+  graph, one sync per round.
+* Cost: draft step = MTP layer (~0.24 GB at 4-bit) + lm_head (248320 x 5120,
+  ~0.7 GB at 4-bit): 7.5 ms per drafted token, 22.7 ms for k = 3 (8-bit
+  layer: 9.2 ms/token, bf16: 12.1). The lm_head is ~70% of it, hence:
+* **Vocabulary subset** (`vocab=N`): draft argmax only over token ids < N plus
+  the 276 special/added ids (byte-level BPE ids are in merge order, so low ids
+  are the frequent ones; no corpus statistics used). The subset rows of the
+  4-bit lm_head are gathered once per drafter. N = 65536 covers 97.8% of the
+  greedy output tokens of the six prompts (32768: 93.7%, 100000: 99.9%) and
+  cuts drafting to 3.6 ms/token (10.7 ms per k = 3 round). The verify pass
+  still uses the full lm_head, so this only costs acceptance, never
+  correctness.
+
+### Results (6 prompts, 256 tokens, greedy, thinking off)
+
+Session greedy 8.57 tok/s (re-run in the same session); `k3` and the
+`vocab65536` k3/k4 rows are median of 2 repeats, the rest single runs. Per-round
+time from the profiled run.
+
+| config | code_edit | code_gen | summarize | prose | explain | math | mean tok/s | vs greedy | accept | tok/round | draft / verify ms per round |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| greedy | 8.56 | 8.57 | 8.55 | 8.58 | 8.58 | 8.58 | **8.57** | 1.00x | - | 1 | - |
+| draft 0.8B-4bit k=3 (ref) | 24.16 | 21.63 | 18.02 | 14.29 | 17.51 | 21.75 | **19.56** | 2.28x | 0.60 | 2.72 | 17.1 / 122.9 |
+| mtp k=1 | 15.12 | 15.07 | 14.44 | 13.11 | 13.96 | 15.07 | **14.46** | 1.69x | 0.89 | 1.89 | 7.8 / 121.8 |
+| mtp k=2 | 20.69 | 20.06 | 19.26 | 15.37 | 18.56 | 19.80 | **18.96** | 2.21x | 0.82 | 2.64 | 15.2 / 123.2 |
+| mtp k=3 | 25.35 | 23.26 | 21.26 | 14.60 | 20.57 | 23.39 | **21.41** | 2.50x | 0.73 | 3.19 | 22.9 / 125.8 |
+| mtp k=4 | 25.45 | 21.24 | 21.10 | 13.15 | 18.76 | 22.00 | **20.28** | 2.37x | 0.65 | 3.59 | 30.3 / 145.1 |
+| mtp k=2 vocab 65536 | 21.99 | 20.70 | 20.12 | 15.43 | 18.73 | 21.06 | **19.67** | 2.30x | 0.80 | 2.59 | 7.2 / 123.6 |
+| **mtp k=3 vocab 65536** | 27.65 | 24.48 | 22.35 | 16.40 | 21.85 | 25.37 | **23.02** | **2.69x** | 0.71 | 3.14 | 10.7 / 124.5 |
+| mtp k=3 vocab 32768 | 26.56 | 23.26 | 22.62 | 16.14 | 22.39 | 25.36 | **22.72** | 2.65x | 0.67 | 3.01 | 8.4 / 122.4 |
+| mtp k=4 vocab 65536 | 26.99 | 22.84 | 21.77 | 14.33 | 20.38 | 24.14 | **21.74** | 2.54x | 0.63 | 3.50 | 14.2 / 145.3 |
+| mtp-hybrid k=3 | 26.02 | 23.16 | 21.44 | 15.45 | 20.17 | 21.90 | **21.36** | 2.49x | 0.68 | 3.04 | 19.1 / 122.5 |
+| mtp-hybrid k=3 vocab 65536 | 26.89 | 23.82 | 22.13 | 16.42 | 21.44 | 23.02 | **22.29** | 2.60x | 0.67 | 3.01 | 9.3 / 124.8 |
+
+(`accept` = mean over prompts of accepted/drafted; rollback is 1-2 ms per
+round on average.) MTP layer precision, k = 3, 3 prompts x 128 tokens
+(`logs/mlx_mtp_explore.log`): 4-bit 0.636 accepted / 20.3 tok/s, 8-bit 0.643 /
+19.7, bf16 0.638 / 18.6. Precision of the one layer doesn't move acceptance;
+4-bit is fastest.
+
+**Acceptance per draft position** (conditional: P(draft j accepted | 1..j-1
+accepted), pooled over the 6 prompts):
+
+| config | pos 1 | pos 2 | pos 3 | pos 4 |
+|---|---|---|---|---|
+| mtp k=1 | 0.885 | | | |
+| mtp k=2 | 0.887 | 0.816 | | |
+| mtp k=3 | 0.862 | 0.792 | 0.807 | |
+| mtp k=4 | 0.859 | 0.796 | 0.734 | 0.769 |
+| mtp k=3 vocab 65536 | 0.852 | 0.789 | 0.777 | |
+| draft 0.8B k=3 | 0.732 | 0.769 | 0.747 | |
+
+Per prompt, position 1 ranges from 0.98 (code_edit) to 0.69-0.73 (prose);
+prose at k = 3 is 0.69 / 0.56 / 0.41. Chaining the head on its own output
+costs less than expected (0.86 -> 0.79 -> 0.78-0.81 conditional), so k = 3
+is still worth it; k = 4 loses because T = 5 costs 1.21x (verify 145 vs
+125 ms), as the verify curve predicts.
+
+Reading it:
+
+* **MTP beats the 0.8B draft model** on every prompt: first-position
+  acceptance 0.86 vs 0.73 (it sees the target's own last hidden state), and
+  with the vocabulary subset it drafts 3 tokens in 10.7 ms vs 17 ms. +18%
+  end to end (23.0 vs 19.6 tok/s). Without the subset, MTP drafting
+  (7.5 ms/token, dominated by the 4-bit lm_head) is slower per token than the
+  0.8B model (5.7 ms/token), and the gain is +9%.
+* Verify is ~90% of a round; the remaining lever is acceptance (prose) or a
+  cheaper wide verify (see the `quantized_matmul` section), not drafting.
+* MTP + n-gram (`mtp-hybrid`) doesn't help: where the n-gram matches, MTP
+  already predicts the copy (code_edit position 1: 0.98), and n-gram
+  proposals are accepted less often than MTP's (hybrid accept 0.67 vs 0.71).
+* vs Track A (llama.cpp MTP, `notes/llama-mtp-dflash.md`,
+  `results/llama-mtp-dflash.jsonl`): their acceptance is the same as ours
+  (n_max 1 / 2 / 3: 0.90 / 0.81 / 0.74 vs our k = 1 / 2 / 3: 0.89 / 0.82 /
+  0.73), a good sign the head is wired the same way. Their best is 11.1
+  tok/s (1.67x over 6.65, n_max 2, Q4 sidecar); ours 23.0 (2.69x over 8.57).
+  The difference is the verify curve: llama.cpp's Q4_K_M verify costs 1.4x at
+  3 tokens and 2x at 4, ours is flat to 4 tokens, so we can use k = 3; plus
+  MLX's faster base decode.
+
+### Correctness
+
+* `tests/test_mtp_tiny.py` (tiny random fp32 qwen3_5 + random MTPHead;
+  `SPECDEC_CPU=1` runs it on the CPU without the lock, 25 s): for
+  rollback `replay` and `reforward`, hidden `normed` and `hidden`, k = 1-3,
+  and three drivers (MTP alone; n-gram/MTP hybrid; a noisy oracle that lets
+  MTP draft only every 3rd round, so pending rows accumulate over k = 0
+  rounds): spec == greedy, and the first-step MTP output of **every** round
+  equals (atol 2e-4) the output computed from scratch over the final committed
+  sequence (target hiddens from one fresh pass, all pairs in one MTP pass).
+  Mutation checks: skipping the trim of chained entries, or misordering the
+  pending tokens, fails it. Also: chunked prefill returns all hidden rows;
+  the vocab-subset argmax equals the argmax of the full logits restricted to
+  the subset.
+* 27B, bf16 (`bench/mlx_mtp_session.py`, every config above): code_edit and
+  prose identical to greedy; code_gen, summarize, explain, math diverge at
+  tokens 147, 147, 42, 8 for **every** drafter including the 0.8B draft
+  model, the same points as before. `diagnose()` on each: one-bf16-ulp ties
+  (single-step margin 0.125, batched margin 0.0 or 0.125) -> "numerical
+  near-tie"; no case with a clear margin.
+* 27B, float32 activations (`tests/test_fp32_27b.py` with
+  `mtp:k=3`, `mtp-hybrid:k=3:vocab=65536`, `mtp:k=4`, now in its default
+  config list): **12/12 identical to greedy** on those four prompts, past every
+  bf16 divergence point (`logs/mlx_mtp_fp32.log`). `test_equivalence_27b.py`
+  also lists the MTP configs now (not re-run as a whole; the session above
+  covers the same check).
+
+### Open items
+
+* Prose acceptance (0.69 at position 1) is the weak spot; nothing in the
+  drafter can fix it short of a better head.
+* Smarter k: a confidence cutoff (llama.cpp's `p_min`) would only save
+  drafting time (~3.6 ms/token with the subset), since T <= 4 verify is flat;
+  an adaptive k = 4 when the head is confident might pay on code_edit-like
+  text. Not tried.
+* The vocabulary subset is an id-order heuristic; a frequency list from a real
+  corpus (or a learned "hot vocab" as in FR-Spec) would cover more for the
+  same size.
+* DFlash (`z-lab/Qwen3.8-27B-DFlash2`) was not attempted. It needs the target's
+  layers 5/19/33/47/61 outputs (`SpecModel.forward` would have to expose
+  them), five 5120-wide layers with dynamic grouped convs and a selector
+  lattice (llama.cpp `src/models/dflash.cpp`, 1000 lines) ~1.1 GB at 4-bit,
+  and Track A measured the same acceptance as MTP at short blocks (q4 n2:
+  0.82 vs MTP 0.81). With our verify curve capping useful blocks at 3 drafts,
+  it is unlikely to beat MTP k = 3 here unless the wide verify gets cheaper.
+
 ## Dead ends and gotchas
 
 * A run on a busy machine is worthless: the first benchmark pass (session 1)
@@ -372,10 +561,7 @@ Reading it:
 
 ## Next steps
 
-1. **MTP drafter** on the interface (plan in `MTPDrafter`). It needs no
-   second model, its drafting is one small layer instead of a 0.8B model
-   (~1-2 ms vs ~6 ms per token), and k = 1-3 is exactly the cheap verify
-   range here. Weights are in the bf16 `Qwen/Qwen3.8-27B` download.
+1. ~~MTP drafter~~: done (section "MTP drafter"); open items there.
 2. **A wider cheap verify**: the staircase above T = 4 is the main limit on
    every method. If `quantized_matmul` could stream the weights once for up to
    ~8-16 rows (the work is bandwidth-bound: 15 GB at ~130 GB/s ≈ 115 ms no

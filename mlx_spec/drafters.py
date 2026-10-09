@@ -32,7 +32,7 @@ Invariants the drafter can rely on:
   ``last``. ``start`` gets the prompt's ``ForwardOutput`` (for prompts longer
   than the prefill chunk: of the last chunk only; ask for more if needed).
 
-Adding MTP (Qwen3.8 ships one MTP layer) on top of this, see ``MTPDrafter``.
+Qwen3.8's own MTP layer as a drafter: ``mtp.MTPDrafter``.
 """
 
 from typing import List, Optional, Protocol
@@ -230,6 +230,10 @@ class DraftModelDrafter:
 class HybridDrafter:
     """Prompt lookup when it finds a long match, the draft model otherwise.
 
+    ``model`` is a ``DraftModelDrafter`` (told about skipped rounds via
+    ``skip``) or an ``MTPDrafter`` (whose ``commit`` after a round it didn't
+    draft just queues the committed hidden states).
+
     N-gram drafts are free, so on text that copies from the context (code
     edits, summaries) this skips the draft model's ~6 ms per drafted token;
     elsewhere it is the draft model. The draft model is told about the
@@ -250,62 +254,15 @@ class HybridDrafter:
         return d if self.used_ngram else self.model.draft(last, k)
 
     def draft_probs(self):
-        return None if self.used_ngram else self.model.draft_probs()
+        return None if self.used_ngram else getattr(self.model, "draft_probs", lambda: None)()
 
     def commit(self, out, n_accepted):
         self.ngram.commit(out, n_accepted)
-        if self.used_ngram:
+        if self.used_ngram and hasattr(self.model, "skip"):
             self.model.skip(out.tokens[: n_accepted + 1].tolist())
         else:
             self.model.commit(out, n_accepted)
 
 
 # ---------------------------------------------------------------------------
-# MTP (to be implemented on top of this interface)
-
-
-class MTPDrafter:
-    """Plan for Qwen3.8's multi-token-prediction head (not implemented yet).
-
-    Weights: ``Qwen/Qwen3.8-27B`` has ``mtp_num_hidden_layers: 1`` with
-    tensors ``mtp.fc.weight`` [5120, 10240], ``mtp.pre_fc_norm_embedding``,
-    ``mtp.pre_fc_norm_hidden``, ``mtp.layers.0.*`` (one full-attention decoder
-    layer: q/k/v/o_proj with output gate, q/k_norm, MLP, the two layernorms)
-    and ``mtp.norm``. mlx-community/Qwen3.8-27B-4bit does NOT ship them
-    (its index has no ``mtp.*`` keys, and ``qwen3_5.TextModel.sanitize`` drops
-    them anyway), so load them separately from the bf16 checkpoint shards and
-    quantize them (or keep bf16, it's ~0.9 GB).
-
-    One MTP step (vLLM's Qwen3NextMTP)::
-
-        e = pre_fc_norm_embedding(embed_tokens(tok_{i+1}))   # shared embedding
-        h = pre_fc_norm_hidden(hidden_i)                     # target hidden at i
-        x = fc(concat([e, h], -1))
-        x = mtp_layer(x, cache=mtp_kv_cache)                 # position i + 1
-        logits_{i+2} = lm_head(mtp.norm(x))                  # shared lm_head
-
-    Check which hidden the reference implementation feeds (vLLM passes the
-    target model's returned hidden states, i.e. post-final-norm, which is
-    ``ForwardOutput.normed``; ``ForwardOutput.hidden`` is the pre-norm residual
-    in case it is the other one). Both come for free from the verify pass.
-
-    Hooking it into the interface:
-
-    * ``start(prompt, prefill)``: run the MTP layer over the prompt to fill its
-      KV cache: inputs ``(prefill.normed[i], prompt[i + 1])`` for each i
-      (needs the hidden of the whole prompt; let ``SpecModel.prefill`` return
-      all chunks if the prompt is longer than one chunk).
-    * ``draft(last, k)``: first step uses the hidden of the last committed
-      position (kept from the previous ``commit``) with token ``last``; for
-      k > 1 feed the MTP layer's own output hidden back in (the head was
-      trained for one step, so acceptance decays quickly; k = 1..3).
-    * ``commit(out, n)``: trim the MTP KV cache like the target's (it is a
-      plain ``KVCache``, no recurrent state), then append the entries for the
-      newly committed positions using ``out.normed[:n + 1]`` and
-      ``out.tokens[1:n + 1] + [next token]``, and remember ``out.normed[n]``.
-    """
-
-    name = "mtp"
-
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError("MTP drafter: see the class docstring for the plan")
+# MTP: see mlx_spec/mtp.py (MTPDrafter, MTPHead)

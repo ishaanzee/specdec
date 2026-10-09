@@ -17,7 +17,10 @@ import pytest
 pytestmark = pytest.mark.skipif(os.environ.get("SPECDEC_27B") != "1", reason="set SPECDEC_27B=1")
 
 PROMPTS = ["code_gen", "summarize", "explain", "math"]
-CONFIGS = ["ngram:k=4:n=2-4:rollback=replay", "ngram:k=4:n=2-4:rollback=capture", "draft:k=4"]
+CONFIGS = ["ngram:k=4:n=2-4:rollback=replay", "ngram:k=4:n=2-4:rollback=capture", "draft:k=4",
+           "mtp:k=3", "mtp-hybrid:k=3:vocab=65536"]
+if os.environ.get("SPECDEC_CONFIGS"):  # e.g. SPECDEC_CONFIGS="mtp:k=3 mtp:k=4"
+    CONFIGS = os.environ["SPECDEC_CONFIGS"].split()
 MAX_TOKENS = 160
 
 

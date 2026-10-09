@@ -19,7 +19,11 @@ CONFIGS = [
     "ngram:k=4:n=2-4:rollback=capture",
     "ngram:k=4:n=2-4:rollback=reforward",
     "draft:k=4",
+    "mtp:k=3",
+    "mtp-hybrid:k=3:vocab=65536",
 ]
+if os.environ.get("SPECDEC_CONFIGS"):
+    CONFIGS = os.environ["SPECDEC_CONFIGS"].split()
 
 
 @pytest.fixture(scope="module")
