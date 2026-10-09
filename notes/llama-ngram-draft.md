@@ -157,7 +157,10 @@ spread < 0.3%).
 | draft-simple,ngram-simple | q35-0.8b-n8-p0.5+ngs-n6-m16 | 1 | 12.99 (1.95x) | 11.23 (1.68x) | 8.10 (1.22x) | 7.53 (1.13x) | 6.28 (0.94x) | 9.26 (1.39x) | 9.23 (1.38x) | 939/1533 (61%) | math differ |
 | draft-simple | q35-0.8b-n16-p0.7-final | 2 | 15.22 (2.28x) | 13.26 (1.98x) | 10.39 (1.55x) | 7.46 (1.12x) | 7.16 (1.07x) | 11.18 (1.67x) | 10.78 (1.61x) | 932.0/1133.0 (82%) | math differ |
 
-__DRAFT3__
+Not run (queued, then cancelled at 09:30 because four other sessions were waiting for the GPU lock): phase
+`draft3` in `bench/llama_ngram_sweep.sh` = 0.8B with n-max 24 / p-min 0.7, n16 / p0.8, n32 / p0.8, and
+n16 / p0.7 + ngram-simple. The n8 -> n16 trend at p0.7 (1.46x -> 1.61x) says longer gated drafts may still help;
+run `scripts/gpu.py bench/llama_ngram_sweep.sh draft3` (~1 h) to check.
 
 ## What worked / dead ends
 
