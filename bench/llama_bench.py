@@ -36,6 +36,12 @@ results/<experiment>.jsonl with the README schema plus extras (medians over
 repeats; per-run values in `runs`). The server log goes to
 logs/llama_<experiment>_<config>.log. A summary table is printed at the end.
 
+--paired: for every (round, prompt), also run a fresh `--spec-type none` server on
+the same prompt immediately before or after (order alternates) and report
+`speedup` = candidate gen tok/s / reference gen tok/s (median over rounds). Use
+this whenever the machine is shared: background load drifts by 20%+ over an hour,
+which swamps unpaired comparisons. Doubles the run time.
+
 Other options: --only id1,id2 (subset of prompts), --max-tokens, --model-tag
 (baseline directory name; default = gguf filename stem), --dump-raw (print the
 first raw JSON response), --no-write (don't append results), --track (default A).
@@ -170,6 +176,8 @@ def main():
     ap.add_argument("--threads", type=int, default=6)
     ap.add_argument("--restart", choices=["prompt", "round", "never"], default="prompt")
     ap.add_argument("--save-baseline", action="store_true")
+    ap.add_argument("--paired", action="store_true",
+                    help="run a --spec-type none reference next to every candidate run; adds ref_gen_tok_s and speedup")
     ap.add_argument("--dump-raw", action="store_true")
     ap.add_argument("--no-write", action="store_true")
     ap.add_argument("extra", nargs=argparse.REMAINDER)
@@ -182,8 +190,21 @@ def main():
     prompts = load_prompts(a.prompts, a.only)
 
     runs = {p["id"]: [] for p in prompts}
+    refs = {p["id"]: [] for p in prompts}
     srv = None
     load_times = []
+
+    def ref_run(p):
+        # paired reference: a no-speculation server run right next to the candidate run,
+        # so both see the same background load (this machine is shared).
+        rs = Server(a.model, ["--spec-type", "none"], a.ctx, a.threads, log_path).start()
+        try:
+            rs.chat("Say hi.", 4)
+            r = one_run(rs, p, a.max_tokens, False)
+        finally:
+            rs.stop()
+        refs[p["id"]].append(r)
+        print(f"[ref] {p['id']:<10} gen {r['gen_tok_s']:.2f} tok/s", file=sys.stderr, flush=True)
 
     def fresh():
         nonlocal srv
@@ -198,8 +219,13 @@ def main():
         for rnd in range(a.repeat):
             if a.restart == "round" or (a.restart == "never" and srv is None):
                 fresh()
-            for p in prompts:
-                if a.restart == "prompt":
+            for i, p in enumerate(prompts):
+                ref_first = a.paired and (rnd + i) % 2 == 0
+                if ref_first:
+                    if srv:
+                        srv.stop(); srv = None
+                    ref_run(p)
+                if a.restart == "prompt" or (a.paired and srv is None):
                     fresh()
                 r = one_run(srv, p, a.max_tokens, a.dump_raw and not dumped)
                 dumped = True
@@ -208,6 +234,9 @@ def main():
                 print(f"[{a.method}/{a.config_name}] round {rnd+1} {p['id']:<10} "
                       f"gen {r['gen_tok_s']:.2f} tok/s  n={r['n_gen']}{acc}  "
                       f"prompt {r['prompt_tok_s']:.1f} tok/s", file=sys.stderr, flush=True)
+                if a.paired and not ref_first:
+                    srv.stop(); srv = None
+                    ref_run(p)
     finally:
         if srv:
             srv.stop()
@@ -229,6 +258,14 @@ def main():
                 diverge = next((i for i, (x, y) in enumerate(zip(texts[0], b)) if x != y), min(len(b), len(texts[0])))
         dn = med([r["draft_n"] for r in rs])
         da = med([r["draft_accepted"] for r in rs])
+        rf = refs[p["id"]]
+        paired = {}
+        if rf:
+            ratios = [r["gen_tok_s"] / q["gen_tok_s"] for r, q in zip(rs, rf)]
+            paired = {"ref_gen_tok_s": round(med([q["gen_tok_s"] for q in rf]), 3),
+                      "speedup": round(med(ratios), 4),
+                      "ref_runs": [q["gen_tok_s"] for q in rf],
+                      "ref_matches_baseline": all(q["text"] == bfile.read_text() for q in rf) if bfile.exists() else None}
         rows.append({
             "track": a.track, "method": a.method, "config": a.config_name, "prompt_id": p["id"],
             "kind": p.get("kind"),
@@ -252,6 +289,7 @@ def main():
             "restart": a.restart,
             "server_load_s": round(med(load_times), 1),
             "llama_cpp": "brew 0.4.1 b10964 b29c606e2",
+            **paired,
             "time": time.strftime("%F %T"),
         })
 
@@ -263,11 +301,15 @@ def main():
                 f.write(json.dumps(row) + "\n")
 
     print(f"\n{a.method} / {a.config_name}  (median of {a.repeat}, model {tag})")
-    print(f"{'prompt':<11}{'gen tok/s':>10}{'prompt t/s':>11}{'accept':>14}{'match':>7}")
+    print(f"{'prompt':<11}{'gen tok/s':>10}{'prompt t/s':>11}{'accept':>14}{'match':>7}{'ref t/s':>9}{'speedup':>9}")
     for row in rows:
         acc = f"{row['draft_accepted']}/{row['draft_n']}" if row["draft_n"] else "-"
-        print(f"{row['prompt_id']:<11}{row['gen_tok_s']:>10.2f}{row['prompt_tok_s']:>11.1f}{acc:>14}{str(row['matches_baseline']):>7}")
-    print(f"{'mean':<11}{statistics.mean(r['gen_tok_s'] for r in rows):>10.2f}")
+        extra_cols = f"{row['ref_gen_tok_s']:>9.2f}{row['speedup']:>9.3f}" if "speedup" in row else ""
+        print(f"{row['prompt_id']:<11}{row['gen_tok_s']:>10.2f}{row['prompt_tok_s']:>11.1f}{acc:>14}{str(row['matches_baseline']):>7}{extra_cols}")
+    tail = ""
+    if all("speedup" in r for r in rows):
+        tail = f"{'':>32}{statistics.mean(r['ref_gen_tok_s'] for r in rows):>9.2f}{statistics.mean(r['speedup'] for r in rows):>9.3f}"
+    print(f"{'mean':<11}{statistics.mean(r['gen_tok_s'] for r in rows):>10.2f}{tail}")
     if any(r["reasoning_chars"] or r["think_tag_in_content"] for r in rows):
         print("WARNING: thinking output detected (reasoning_content or <think> in content)")
 
