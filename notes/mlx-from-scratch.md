@@ -184,3 +184,76 @@ rest): 8.37 vs 8.36 tok/s, no difference, so it was removed again. (In
 `results/mlx_verify_cost.jsonl`, `replay/sync` = replay without chunking,
 `replay` = with chunking, measured under CPU contention; `capture` and
 `reforward` rows used chunking.)
+
+## Correctness
+
+* `tests/test_tiny.py` (seconds, GPU): tiny random-weight `qwen3_5` model in
+  float32 with real GDN + attention layers. Checks (a) the capture kernel's
+  per-token states are bitwise equal to the stock kernel's final state for
+  every prefix; (b) after a T-token pass and `commit(n_keep)` for every
+  `n_keep` in 0..T, the conv window, recurrent state and KV offset match a
+  cache that only ever saw `n_keep` tokens, in all three rollback modes, and
+  the next pass gives the same logits; (c) speculative == greedy for every
+  rollback mode with an empty drafter, n-gram, and a "noisy oracle" drafter
+  that proposes the true continuation with 30% corruption (exercises every
+  acceptance length), k = 1, 3, 8; (d) draft-model drafter (incl. adaptive k
+  and the hybrid), with a draft identical to the target accepting 100%;
+  (e) EOS / max-token edge cases. Mutation check: making `replay` skip the
+  rollback fails (b) and (c).
+* `tests/test_sampling.py` (CPU, 2 min): exact speculative sampling. Empirical
+  marginals of tokens 2 and 3 over 3000 samples vs the exact marginals by
+  enumeration on a 16-token-vocab model: TV < 0.06 for n-gram (one-hot
+  proposal), a sampled draft model and a greedy draft model; a negative control
+  that accepts every draft fails the same check.
+* `tests/test_equivalence_27b.py` (real target, bf16, 256 tokens, 6 prompts x
+  {n-gram k=4 replay / capture / reforward, draft k=4}): 11 of 24 runs are
+  identical to greedy; the other 13 diverge, every time at a position where
+  the two best logits are tied or one bf16 ulp apart (0.125 at |logit| ~ 20):
+  `diagnose()` recomputes the logits one token at a time and with a batched
+  pass; e.g. code_gen at token 147: single-step margin 0.125, batched margin
+  0.0 (exact tie, argmax takes the lower id). replay and capture always
+  diverge at the same token (they are bitwise identical by construction);
+  reforward sometimes differs (it recomputes the kept tokens in another batch
+  shape). The divergence points are the same for n-gram and draft-model runs
+  (147, 147, 42, 34/8): wherever a T>1 pass covers that position, the tie
+  breaks the other way. **Verdict: numerical, not a bug.** The test now
+  tolerates mismatches that `diagnose` classifies as near-ties and fails on any
+  other.
+* `tests/test_fp32_27b.py`: same target with every bf16 parameter (incl.
+  quantization scales/biases) upcast to float32, so the whole forward runs in
+  fp32. On the four prompts that diverged in bf16, 160 tokens, n-gram replay,
+  n-gram capture and draft k=4: **12/12 identical to greedy**, including past
+  every bf16 divergence point. Rollback and acceptance are exact; the bf16
+  differences come only from batched-vs-single-row kernels.
+* Benchmark rows record `matches_baseline` and `diverge_at_token` against our
+  greedy tokens (`results/mlx_baseline_tokens/`).
+
+## Drafters
+
+Interface (`mlx_spec/drafters.py` docstring, `mlx_spec/README.md`):
+`start(prompt, prefill)`, `draft(last, k) -> mx.array`, `commit(out, n)`,
+optional `draft_probs()` for sampling. `out` is the verify pass's
+`ForwardOutput` with logits and pre/post-norm hidden states for every position.
+
+* **N-gram** (`NgramDrafter`): most recent earlier occurrence of the last n
+  tokens (n from `n_max` down to `n_min`) in prompt + output; propose what
+  followed. Free on the CPU (~0.1 ms per round).
+* **Draft model** (`DraftModelDrafter`): `mlx-community/Qwen3.5-0.8B-MLX-4bit`
+  (and `Qwen3.5-2B-MLX-8bit`). Tokenizer check (mine, and Track A's in
+  `notes/llama-ngram-draft.md`): same 248044-entry vocab and merges, same
+  33 added tokens in the mlx-community conversions, vocab_size 248320; the
+  only difference is the pre-tokenizer regex (`\p{M}` handling), which doesn't
+  matter because the draft model is fed the target's token ids. Qwen3.5-0.8B
+  is itself a GDN hybrid; it is rolled back with free per-step snapshots.
+  ~6 ms per drafted token.
+* **Hybrid** (`HybridDrafter`): n-gram when it finds a match of >= 3 tokens
+  with >= 2 tokens to propose, else the draft model (which is told about the
+  tokens it skipped).
+* **Adaptive k** (`DraftModelDrafter(k_min=...)`): k += 1 after a fully
+  accepted round, -1 after a fully rejected one.
+* **MTP** (`MTPDrafter`): plan only, in the class docstring. The 4-bit
+  mlx-community checkpoint has no `mtp.*` tensors (its index has 0 of them, and
+  mlx-lm's `sanitize` drops them anyway); `Qwen/Qwen3.8-27B` (bf16, now in the
+  HF cache) has 15: `mtp.fc`, `mtp.pre_fc_norm_{embedding,hidden}`,
+  `mtp.layers.0.*` (one full-attention layer + MLP), `mtp.norm`. The verify
+  pass already returns the target hidden states it needs.
