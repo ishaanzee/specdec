@@ -159,7 +159,10 @@ whose verify batches reach 4 tokens (n_max >= 3, any drafter) changes `explain` 
 `math` (char 55), always at the same places. That is the kernel switch above: 4..8-token batches use
 `mul_mv_ext` for the Q4_K/Q6_K/Q8_0 matmuls, whose different accumulation order changes logits by float rounding,
 and those two prompts have a near-tie at that point. It is not a drafter bug (MTP and DFlash diverge identically,
-and the text stays fluent); it is the "tiny float differences" case the README anticipates. `--spec-draft-p-min`
+and the text stays fluent: `math` switches from "### 1. Identify the Given Information" to "### Step 1: Determine
+the head start of the first train", `explain` from "maps a large key space into a smaller array" to "maps an
+infinite (or large) key space into a finite array"; the harness saves the diverging texts under
+`results/mismatch_outputs/llama-mtp-dflash/`); it is the "tiny float differences" case the README anticipates. `--spec-draft-p-min`
 configs with n_max 3 only sometimes reach 4-token batches, so they may or may not match.
 
 ## Results (stock Homebrew llama-server, ggml-org Q4_K_M target)

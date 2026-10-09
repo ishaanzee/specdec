@@ -1,0 +1,17 @@
+Here is the step-by-step solution to the problem.
+
+### Step 1: Determine the head start of the first train
+
+The first train leaves at 3:15 pm, and the second train leaves at 3:45 pm. We need to calculate how much time the first train travels before the second train starts.
+
+$$ \text{Time difference} = 3:45 \text{ pm} - 3:15 \text{ pm} = 30 \text{ minutes} $$
+
+Convert this time into hours, as the speeds are given in km/h:
+$$ 30 \text{ minutes} = \frac{30}{60} \text{ hours} = 0.5 \text{ hours} $$
+
+### Step 2: Calculate the distance covered by the first train during the head start
+
+Using the speed of the first train ($84 \text{ km/h}$) and the head start time ($0.5 \text{ hours}$), we calculate the distance it covers before the second train departs.
+
+$$ \text{Distance}_{\text{head start}} = \text{Speed}_1 \times \text{Time} $$
+$$ \text
