@@ -1,0 +1,5 @@
+*   **Core Mechanism**: Speculative decoding accelerates generation by having a smaller draft model propose tokens that the large target model "verifies them in a single forward pass," accepting matches and replacing the first disagreement with the target's token.
+*   **Hardware Efficiency**: The technique leverages the fact that decoding on modern accelerators is "limited by memory bandwidth rather than compute," meaning "verifying several tokens costs nearly the same as generating one."
+*   **Output Fidelity**: The method ensures high-quality results, as "with greedy decoding the output is identical to the target model alone," and sampling uses a "modified rejection scheme [that] preserves the target distribution exactly."
+*   **Performance Variability**: The overall speedup is driven by the "acceptance rate," which is "higher for predictable text such as code and lower for creative writing."
+*   **Implementation Variants**: Beyond standard draft models, approaches include "n-gram lookup drafting, which needs no draft model," "multi-token prediction heads trained jointly with the target," and "block-diffusion drafters that propose many tokens at once."

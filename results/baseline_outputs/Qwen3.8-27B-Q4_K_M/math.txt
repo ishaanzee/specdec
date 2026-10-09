@@ -1,0 +1,20 @@
+Here is the step-by-step solution to the problem.
+
+### 1. Identify the Given Information
+
+*   **Train 1 (First Train):**
+    *   Departure Time: $3:15 \text{ PM}$
+    *   Speed ($v_1$): $84 \text{ km/h}$
+*   **Train 2 (Second Train):**
+    *   Departure Time: $3:45 \text{ PM}$
+    *   Speed ($v_2$): $105 \text{ km/h}$
+*   **Condition:** Both trains travel on the same track in the same direction. Train 2 is faster and will eventually catch up to Train 1.
+
+### 2. Determine the Head Start of Train 1
+
+First, we calculate how much time Train 1 has before Train 2 starts.
+
+$$ \text{Time difference} = 3:45 \text{ PM} - 3:15 \text{ PM} = 30 \text{ minutes} $$
+
+Convert this time into hours, as the speeds are in km/h:
+$$ 30 \text{ minutes} = \frac{30}{6

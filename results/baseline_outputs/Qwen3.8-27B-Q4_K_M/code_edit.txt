@@ -1,0 +1,43 @@
+```python
+#!/usr/bin/env python3
+"""Run a command while holding the machine-wide GPU lock.
+
+Only one model fits in memory at a time and parallel runs ruin timings, so every
+command that loads a model goes through here: scripts/gpu.py <cmd> [args...]
+"""
+import argparse
+import fcntl
+import os
+import subprocess
+import sys
+import time
+
+DEFAULT_LOCK = "/tmp/specdec-gpu.lock"
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run a command while holding the machine-wide GPU lock."
+    )
+    parser.add_argument(
+        "--lock-path",
+        default=DEFAULT_LOCK,
+        help=f"Path to the lock file (default: {DEFAULT_LOCK})",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress the wait message",
+    )
+    parser.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Command and arguments to run",
+    )
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.error("a command is required")
+
+    with open(args.lock

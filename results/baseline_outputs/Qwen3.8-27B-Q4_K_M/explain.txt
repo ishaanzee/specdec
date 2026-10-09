@@ -1,0 +1,26 @@
+# Hash Map Collision Handling
+
+## What Is a Collision?
+
+A collision occurs when two different keys produce the same hash index. Since a hash function maps a large key space into a smaller array, collisions are **inevitable** (pigeonhole principle). The strategy for resolving them determines performance characteristics.
+
+---
+
+## Two Primary Strategies
+
+### 1. Chaining (Separate Chaining)
+
+Each bucket in the hash table stores a **linked list** (or another data structure) of all entries that hash to that index.
+
+```
+Index:  0    1    2    3    4
+       [A]  [ ]  [B]->[C]  [ ]  [D]
+```
+
+- **Insert**: Compute hash → append to the list at that bucket.
+- **Lookup**: Compute hash → traverse the list at that bucket.
+- **Delete**: Compute hash → find and remove from the list.
+
+**Complexity** (with `n` elements, `m` buckets, load factor α = n/m):
+- Average case: **O(1)** for insert, lookup, delete
+- Worst case: **O(n)** if all keys collide (de
