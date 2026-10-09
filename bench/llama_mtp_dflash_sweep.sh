@@ -94,16 +94,18 @@ case "${1:-}" in
     ;;
   mm-spec)
     # spec decoding on the patched server; MMB = GGML_METAL_MM_MIN_BATCH
-    export GGML_METAL_MM_MIN_BATCH=${MMB:-5}
+    MMB=${MMB:-5}; export GGML_METAL_MM_MIN_BATCH=$MMB
     BS() { local method=$1 cfg=$2 model=$3; shift 3
       LLAMA_SERVER=$BMM/llama-server .venv/bin/python bench/llama_bench_server.py --experiment $EXP \
         --method "$method" --config-name "$cfg" --model "$model" --model-tag Qwen3.8-27B-Q4_K_M --repeat "$REP" "$@" 2>&1 | grep -v '^\['; }
     BS none mm$MMB-nospec $M -- --spec-type none
     BS draft-mtp mm$MMB-own-q4-n2 $M -- -md $MTP_OWN_Q4 --spec-type draft-mtp --spec-draft-n-max 2
     BS draft-mtp mm$MMB-own-q4-n3 $M -- -md $MTP_OWN_Q4 --spec-type draft-mtp --spec-draft-n-max 3
+    BS draft-mtp mm$MMB-own-q4-n4 $M -- -md $MTP_OWN_Q4 --spec-type draft-mtp --spec-draft-n-max 4
     for n in 3 5 7; do
       BS draft-dflash mm$MMB-q4-n$n $M -- -md $DF_Q4 --spec-type draft-dflash --spec-draft-n-max $n
     done
+    BS draft-dflash mm$MMB-q4-n7+ngram-simple $M -- -md $DF_Q4 --spec-type draft-dflash,ngram-simple --spec-draft-n-max 7
     ;;
   final)
     # best candidates, repeated (REP=2 by default here), same session

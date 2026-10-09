@@ -154,3 +154,104 @@ whose verify batches reach 4 tokens (n_max >= 3, any drafter) changes `explain` 
 and those two prompts have a near-tie at that point. It is not a drafter bug (MTP and DFlash diverge identically,
 and the text stays fluent); it is the "tiny float differences" case the README anticipates. `--spec-draft-p-min`
 configs with n_max 3 only sometimes reach 4-token batches, so they may or may not match.
+
+## Results (stock Homebrew llama-server, ggml-org Q4_K_M target)
+
+Harness `bench/llama_bench.py` (greedy, thinking off, 256 tokens, fresh server per prompt, fixed args
+`-ngl 999 -fa on -c 8192 -t 6 -tb 6 -np 1`), results in `results/llama-mtp-dflash.jsonl`, table produced by
+`bench/summarize_mtp_dflash.py`. Every lock session starts with its own `--spec-type none` reference (6.64-6.67 tok/s
+in all clean sessions). Gen tok/s is the server's `predicted_per_second`. "accepted/drafted" is summed over the
+6 prompts.
+
+### Best configurations (same session, median of 2 runs each)
+
+| config | code_edit | code_gen | summarize | prose | explain | math | **mean** | speedup | match |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| no speculation | 6.50 | 6.67 | 6.67 | 6.68 | 6.68 | 6.61 | **6.64** | 1.00x | 6/6 |
+| MTP sidecar Q4_0, n=2, + ngram-simple | 14.10 | 12.27 | 11.54 | 9.11 | 10.21 | 11.09 | **11.39** | **1.71x** | 6/6 |
+| single-file Q4_K_M+MTP, n=2, + ngram-simple | 13.70 | 11.86 | 11.00 | 9.26 | 9.93 | 11.16 | **11.15** | 1.68x | 6/6 |
+| DFlash2 Q4_0, n=2, + ngram-simple | 13.25 | 11.87 | 10.54 | 9.12 | 9.92 | 10.60 | **10.88** | 1.64x | 6/6 |
+
+### Everything (one run each unless noted)
+
+Note: the first `mtp-ggml` block (ggml-sidecar-n1..n4) ran at 02:00-02:30 while the 54 GB HF download was
+decompressing on the CPU and has no in-session reference; it is ~15% low compared with the later clean sessions
+(e.g. Q8_0 sidecar n=2: 9.18 then vs 10.58 in session `mtp3`). Compare within blocks that share a `ref-*`/`none` row.
+
+| method | config | code_edit | code_gen | summarize | prose | explain | math | mean tok/s | accepted/drafted | match |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| draft-mtp | ggml-sidecar-n1 | 8.64 | 8.88 | 8.50 | 8.08 | 8.58 | 8.54 | **8.54** | 710/794 (89%) | 6/6 |
+| draft-mtp | ggml-sidecar-n2 | 10.30 | 9.97 | 9.24 | 7.65 | 8.35 | 9.57 | **9.18** | 924/1157 (80%) | 6/6 |
+| draft-mtp | ggml-sidecar-n3 | 9.33 | 9.38 | 8.08 | 5.55 | 7.39 | 8.62 | **8.06** | 1024/1444 (71%) | 4/6 (diff: explain, math) |
+| draft-mtp | ggml-sidecar-n4 | 8.36 | 8.38 | 6.76 | 4.45 | 5.77 | 7.67 | **6.90** | 1081/1706 (63%) | 4/6 (diff: explain, math) |
+| none | ref-dflash1 | 6.66 | 6.67 | 6.68 | 6.68 | 6.66 | 6.68 | **6.67** | - | 6/6 |
+| draft-dflash | q8-n3 | 9.71 | 10.47 | 8.64 | 6.88 | 7.78 | 9.28 | **8.79** | 1032/1414 (73%) | 4/6 (diff: explain, math) |
+| draft-dflash | q8-n5 | 10.08 | 10.35 | 8.14 | 5.26 | 6.54 | 9.49 | **8.31** | 1129/1873 (60%) | 4/6 (diff: explain, math) |
+| draft-dflash | q8-n7 | 8.96 | 8.94 | 6.38 | 3.88 | 4.92 | 7.91 | **6.83** | 1166/2354 (50%) | 4/6 (diff: explain, math) |
+| draft-dflash | bf16-n7 | 9.00 | 8.73 | 6.40 | 3.89 | 5.00 | 7.94 | **6.83** | 1166/2354 (50%) | 4/6 (diff: explain, math) |
+| draft-dflash | q4-n7 | 9.20 | 9.02 | 6.39 | 3.71 | 5.03 | 7.90 | **6.87** | 1165/2362 (49%) | 4/6 (diff: explain, math) |
+| none | ref-mtp2 | 6.53 | 6.66 | 6.65 | 6.67 | 6.68 | 6.69 | **6.65** | - | 6/6 |
+| draft-mtp | ggml-sidecar-q4req-n2 | 12.34 | 12.12 | 11.39 | 8.98 | 10.07 | 11.72 | **11.11** | 919/1167 (79%) | 6/6 |
+| draft-mtp | ggml-sidecar-q4req-n3 | 10.42 | 10.78 | 8.99 | 6.36 | 7.61 | 9.65 | **8.97** | 1010/1484 (68%) | 4/6 (diff: explain, math) |
+| draft-mtp | ggml-sidecar-n3-pmin0.6 | 10.14 | 10.22 | 9.44 | 7.82 | 8.59 | 9.72 | **9.32** | 980/1161 (84%) | 6/6 |
+| draft-mtp | ggml-sidecar-n2+ngram-simple | 13.46 | 11.65 | 10.81 | 8.93 | 9.78 | 10.95 | **10.93** | 938/1263 (74%) | 6/6 |
+| none | single-nospec | 6.67 | 6.68 | 6.68 | 6.67 | 6.68 | 6.68 | **6.67** | - | 6/6 |
+| draft-mtp | single-n2 | 12.05 | 11.72 | 10.88 | 9.15 | 9.84 | 11.33 | **10.83** | 926/1153 (80%) | 6/6 |
+| none | ref-dflash2 | 6.67 | 6.68 | 6.67 | 6.66 | 6.68 | 6.68 | **6.67** | - | 6/6 |
+| draft-dflash | q4-n2 | 11.69 | 11.75 | 10.44 | 9.05 | 9.84 | 11.21 | **10.66** | 929/1149 (81%) | 6/6 |
+| draft-dflash | q4-n3 | 10.03 | 10.38 | 8.64 | 6.82 | 7.71 | 9.17 | **8.79** | 1030/1418 (73%) | 4/6 (diff: explain, math) |
+| draft-dflash | q4-n4 | 8.70 | 8.72 | 7.29 | 5.15 | 6.39 | 8.43 | **7.45** | 1091/1650 (66%) | 4/6 (diff: explain, math) |
+| draft-dflash | q4-n7-pmin0.5 | 9.58 | 9.25 | 7.71 | 5.66 | 6.36 | 8.74 | **7.88** | 1154/1719 (67%) | 4/6 (diff: explain, math) |
+| draft-dflash | q4-n7-pmin0.8 | 9.80 | 10.14 | 8.56 | 6.52 | 7.36 | 9.37 | **8.63** | 1065/1176 (91%) | 4/6 (diff: explain, math) |
+| draft-dflash | q4-n3+ngram-simple | 11.66 | 10.51 | 8.77 | 6.91 | 7.81 | 9.28 | **9.15** | 1041/1472 (71%) | 4/6 (diff: explain, math) |
+| none | ref-mtp3 | 6.64 | 6.67 | 6.65 | 6.66 | 6.68 | 6.66 | **6.66** | - | 6/6 |
+| draft-mtp | own-q8-n2 | 11.73 | 11.50 | 10.66 | 8.83 | 9.65 | 11.12 | **10.58** | 924/1157 (80%) | 6/6 |
+| draft-mtp | own-q4-n1 | 11.46 | 11.30 | 11.03 | 9.93 | 10.65 | 10.66 | **10.84** | 706/798 (88%) | 6/6 |
+| draft-mtp | own-q4-n2 | 12.25 | 12.14 | 11.09 | 8.97 | 10.09 | 11.71 | **11.04** | 919/1167 (79%) | 6/6 |
+| draft-mtp | own-q4-n3 | 10.61 | 10.71 | 8.87 | 6.42 | 7.86 | 9.65 | **9.02** | 1014/1473 (69%) | 4/6 (diff: explain, math) |
+| draft-mtp | own-q4-n3-pmin0.6 | 10.70 | 10.86 | 9.95 | 8.18 | 8.75 | 10.41 | **9.81** | 975/1169 (83%) | 6/6 |
+| draft-mtp | own-q4-n4-pmin0.6 | 9.48 | 9.37 | 8.91 | 7.55 | 7.69 | 9.39 | **8.73** | 1028/1292 (80%) | 5/6 (diff: math) |
+| draft-mtp | own-q4-n2+ngram-simple | 14.12 | 12.29 | 11.54 | 9.12 | 10.21 | 11.12 | **11.40** | 932/1319 (71%) | 6/6 |
+| none | final-nospec | 6.50 | 6.67 | 6.67 | 6.68 | 6.68 | 6.61 | **6.64** | - | 6/6 |
+| draft-mtp | final-own-q4-n2+ngram-simple | 14.10 | 12.27 | 11.54 | 9.11 | 10.21 | 11.09 | **11.39** | 932.0/1319.0 (71%) | 6/6 |
+| draft-dflash | final-q4-n2+ngram-simple | 13.25 | 11.87 | 10.54 | 9.12 | 9.92 | 10.60 | **10.88** | 941.0/1303.0 (72%) | 6/6 |
+| draft-mtp | final-single-n2+ngram-simple | 13.70 | 11.86 | 11.00 | 9.26 | 9.93 | 11.16 | **11.15** | 940.0/1259.0 (75%) | 6/6 |
+
+### Findings
+
+* **Draft length 2 is the sweet spot for every drafter** with the stock build (see verification cost above).
+  MTP: n=1 10.84, n=2 11.04, n=3 9.02, (n=4 6.9 in the slow session). DFlash2: n=2 10.66, n=3 8.79, n=4 7.45,
+  n=5 8.31, n=7 6.83-6.87. The MTP head chains fine (acceptance per drafted token 88% at n=1, 79% at n=2, 69% at
+  n=3, ~63% at n=4) but the extra verify cost of 4+-token batches dominates.
+* `--spec-draft-p-min` (confidence cutoff) helps long drafts but does not beat n=2: MTP n=3 p-min 0.6 = 9.81
+  (and it keeps all outputs identical), n=4 p-min 0.6 = 8.73; DFlash n=7 p-min 0.8 = 8.63, p-min 0.5 = 7.88.
+* Drafter precision barely matters for DFlash (bf16 / Q8_0 / Q4_0 at n=7: 6.83 / 6.83 / 6.87, identical acceptance).
+  For MTP the Q4_0 sidecar is a bit faster than Q8_0 (n=2: 11.04 vs 10.58, same acceptance) because each MTP step
+  runs the full 248k-vocab LM head (Q8_0: 1.3 GB, Q4_0: 0.7 GB per drafted token).
+* MTP vs DFlash2 on this machine: equal acceptance at n=2 (~80%), MTP slightly faster (its draft step is
+  one decoder layer + LM head; DFlash runs 5 layers over an 8-token block plus the target's LM head on all 8
+  positions). DFlash2's advantage is long blocks (README: 7 tokens/step on H200), which the M3 Pro can't verify
+  cheaply with the stock kernels.
+* Comma lists work: `--spec-type draft-mtp,ngram-simple` tries the n-gram drafter first (only fires on 12-token
+  verbatim repeats, drafting up to 48 tokens) and falls back to MTP. +2 tok/s on `code_edit` (repeats the
+  input), neutral elsewhere: mean 11.04 -> 11.40.
+* The MTP sidecar (`-md mtp-*.gguf`) and the single spliced GGUF behave the same (10.83 vs 11.04 at n=2;
+  the single file uses the trunk's Q6_K LM head for drafting, the Q4_0 sidecar its own Q4_0 head); the
+  sidecar is more flexible (drafter quant independent of the target) and costs no extra disk for the main model.
+* The single-file GGUF without speculation reproduces the ggml-org outputs exactly and at the same speed
+  (6.67 tok/s, 6/6 match): MTP tensors are skipped at load unless `--spec-type draft-mtp` is given.
+* Prompt processing drops from ~85/45/77 tok/s to ~83/44/76 with a drafter (it also processes the prompt);
+  negligible.
+
+## Best llama-server command (stock Homebrew build)
+
+```bash
+llama-server -m ~/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snapshots/efbb3b1f70a21d97fd4495240648405f7228554f/Qwen3.8-27B-Q4_K_M.gguf \
+    -md ~/Documents/specdec/models/mtp-Qwen3.8-27B-q4_0.gguf \
+    --spec-type draft-mtp,ngram-simple --spec-draft-n-max 2 \
+    -ngl 999 -fa on -c 8192 --jinja
+```
+(Our Q4_0 sidecar uses the same recipe as ggml-org's `mtp-Qwen3.8-27B-Q4_0.gguf`, same byte size; their file
+should work identically. `-hf ggml-org/Qwen3.8-27B-GGUF --spec-type draft-mtp` also auto-downloads an `mtp-*`
+sidecar, but we did not check which quant it picks.) Single-file alternative:
+`llama-server -m models/Qwen3.8-27B-Q4_K_M-mtp.gguf --spec-type draft-mtp,ngram-simple --spec-draft-n-max 2 ...`.
