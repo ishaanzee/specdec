@@ -14,7 +14,8 @@ from typing import Dict, List
 import mlx.core as mx
 
 from .decode import GenResult, greedy_generate, speculative_generate
-from .drafters import DraftModelDrafter, NgramDrafter, NoDrafter, restore, snapshot
+from .drafters import (DraftModelDrafter, HybridDrafter, NgramDrafter, NoDrafter, restore,
+                       snapshot)
 from .model import SpecModel
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -94,9 +95,14 @@ class Runner:
         if m == "ngram":
             lo, hi = (int(x) for x in cfg.get("n", "2-4").split("-"))
             return NgramDrafter(n_max=hi, n_min=lo)
-        if m == "draft":
+        if m in ("draft", "hybrid"):
             name = cfg.get("model", "mlx-community/Qwen3.5-0.8B-MLX-4bit")
-            return DraftModelDrafter(self.draft_model(name), name=name)
+            k_min = int(cfg["kmin"]) if "kmin" in cfg else None
+            d = DraftModelDrafter(self.draft_model(name), name=name, k_min=k_min)
+            if m == "draft":
+                return d
+            lo, hi = (int(x) for x in cfg.get("n", "3-4").split("-"))
+            return HybridDrafter(NgramDrafter(n_max=hi, n_min=lo), d)
         raise ValueError(f"unknown method {m}")
 
     def run(self, cfg, prompt_ids, max_tokens, profile=False) -> GenResult:
@@ -321,3 +327,45 @@ def diagnose(runner: Runner, prompt_ids: List[int], ref: List[int], got: List[in
     res["verdict"] = ("numerical near-tie" if abs(res["single_margin_ref_minus_spec"]) < 0.25
                       else "suspicious: clear margin, look for a bug")
     return res
+
+
+# ------------------------------------------------------------------ summary
+def summary_table(paths=None) -> str:
+    """Markdown table: one line per (method, config), means over prompts.
+
+    If a (method, config, prompt) appears more than once (re-runs), the
+    latest row wins.
+    """
+    from collections import OrderedDict
+
+    paths = paths or sorted((ROOT / "results").glob("mlx_*.jsonl"))
+    rows = OrderedDict()
+    for path in paths:
+        if path.name == "mlx_verify_cost.jsonl":
+            continue
+        for line in open(path):
+            r = json.loads(line)
+            rows[(r["method"], r["config"], r["prompt_id"])] = r
+    groups = OrderedDict()
+    for (m, c, _), r in rows.items():
+        groups.setdefault((m, c), []).append(r)
+    base = groups.get(("greedy", "default"))
+    base_tps = statistics.mean(r["gen_tok_s"] for r in base) if base else None
+    prompts = [p["id"] for p in load_prompts()]
+    head = "| method | config | " + " | ".join(prompts) + " | mean tok/s | speedup | accept | tok/round | exact |"
+    out = [head, "|" + "---|" * (head.count("|") - 1)]
+    for (m, c), rs in groups.items():
+        by = {r["prompt_id"]: r for r in rs}
+        mean = statistics.mean(r["gen_tok_s"] for r in rs)
+        acc = [r["accept_rate"] for r in rs if r.get("accept_rate") is not None]
+        tpr = [r["tokens_per_round"] for r in rs if r.get("tokens_per_round")]
+        exact = sum(bool(r["matches_baseline"]) for r in rs)
+        out.append(
+            f"| {m} | {c} | "
+            + " | ".join(f"{by[p]['gen_tok_s']:.2f}" if p in by else "-" for p in prompts)
+            + f" | **{mean:.2f}** | {mean / base_tps:.2f}x | "
+            + (f"{statistics.mean(acc):.2f}" if acc else "-") + " | "
+            + (f"{statistics.mean(tpr):.2f}" if tpr else "-")
+            + f" | {exact}/{len(rs)} |"
+        )
+    return "\n".join(out)

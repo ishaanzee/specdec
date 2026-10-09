@@ -4,6 +4,7 @@
   scripts/gpu.py .venv/bin/python -m mlx_spec bench --configs greedy ngram:k=8:n=2-4 --repeat 2
   scripts/gpu.py .venv/bin/python -m mlx_spec verify-cost
   scripts/gpu.py .venv/bin/python -m mlx_spec mlxlm        # compare with mlx_lm.generate
+  .venv/bin/python -m mlx_spec summary                       # results table (no GPU)
 
 Config strings: ``method[:key=value]...``
   greedy                          plain greedy decode (stock mlx-lm caches)
@@ -50,10 +51,14 @@ def main(argv=None):
     v.add_argument("--modes", default="replay,replay/sync,capture,reforward")
 
     sub.add_parser("mlxlm", help="compare the greedy baseline with mlx_lm.generate")
+    sub.add_parser("summary", help="markdown table of results/mlx_*.jsonl (no model)")
 
     a = ap.parse_args(argv)
     from . import bench as B
 
+    if a.cmd == "summary":
+        print(B.summary_table())
+        return
     runner = B.Runner(a.target or B.TARGET)
 
     if a.cmd == "generate":

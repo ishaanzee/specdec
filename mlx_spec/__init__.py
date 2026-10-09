@@ -9,5 +9,5 @@ Modules:
 """
 
 from .decode import GenResult, greedy_generate, speculative_generate
-from .drafters import DraftModelDrafter, Drafter, NgramDrafter, NoDrafter
+from .drafters import DraftModelDrafter, Drafter, HybridDrafter, NgramDrafter, NoDrafter
 from .model import ForwardOutput, SpecModel

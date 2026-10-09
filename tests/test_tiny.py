@@ -12,7 +12,7 @@ import pytest
 from mlx_lm.models import qwen3_5
 from mlx_lm.models.gated_delta import gated_delta_kernel
 
-from mlx_spec import (DraftModelDrafter, NgramDrafter, NoDrafter, SpecModel,
+from mlx_spec import (DraftModelDrafter, HybridDrafter, NgramDrafter, NoDrafter, SpecModel,
                       greedy_generate, speculative_generate)
 from mlx_spec.drafters import EMPTY
 from mlx_spec.gdn import LinearCache, gated_delta_capture
@@ -140,6 +140,12 @@ def test_draft_model_drafter(model):
         ref = greedy_generate(model, ids, 40).tokens
         for k in (1, 4):
             r = speculative_generate(spec, DraftModelDrafter(draft), ids, k=k, max_tokens=40)
+            assert r.tokens == ref
+        # adaptive draft length, and n-gram/draft-model hybrid
+        for d in (DraftModelDrafter(draft, k_min=1),
+                  HybridDrafter(NgramDrafter(4, 2), DraftModelDrafter(draft)),
+                  HybridDrafter(NgramDrafter(4, 1), DraftModelDrafter(draft, k_min=2), min_len=1)):
+            r = speculative_generate(spec, d, ids, k=4, max_tokens=40)
             assert r.tokens == ref
         # a draft model identical to the target must be accepted every time
         r = speculative_generate(spec, DraftModelDrafter(model), ids, k=4, max_tokens=40)

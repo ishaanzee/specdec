@@ -154,13 +154,17 @@ class DraftModelDrafter:
     """
 
     def __init__(self, model, name: str = "draft", prefill_step: int = 2048,
-                 temperature: float = 0.0):
+                 temperature: float = 0.0, k_min: Optional[int] = None):
         self.model = model
         self.name = name
         self.prefill_step = prefill_step
         # > 0: sample drafts from the draft model and expose their distributions
         # (draft_probs) for exact speculative sampling; 0: greedy drafts.
         self.temperature = temperature
+        # Adaptive draft length in [k_min, k]: +1 after a fully accepted round,
+        # -1 after a fully rejected one. None = always draft k.
+        self.k_min = k_min
+        self.k_cur = None
 
     def start(self, prompt, prefill):
         self.cache = make_prompt_cache(self.model)
@@ -170,7 +174,17 @@ class DraftModelDrafter:
             mx.eval([c.state for c in self.cache])
         self.pending: List[int] = []
 
+    def skip(self, tokens: List[int]):
+        """Committed tokens the drafter didn't draft (e.g. a HybridDrafter round);
+        they are fed to the draft model at the start of the next draft()."""
+        self.pending.extend(tokens)
+        self.snaps = None
+
     def draft(self, last, k):
+        if self.k_min is not None:
+            self.k_max = k
+            self.k_cur = k if self.k_cur is None else min(self.k_cur, k)
+            k = self.k_cur
         if k <= 0:
             self.pending.append(last)
             self.snaps, self.q = None, []
@@ -199,6 +213,11 @@ class DraftModelDrafter:
         if self.snaps is None:
             return
         k = len(self.snaps)
+        if self.k_min is not None:
+            if n_accepted == k:
+                self.k_cur = min(self.k_cur + 1, self.k_max)
+            elif n_accepted == 0:
+                self.k_cur = max(self.k_cur - 1, self.k_min)
         if n_accepted < k:
             # snaps[n] = state after [last, d_1 .. d_n]: exactly the committed tokens
             restore(self.cache, self.snaps[n_accepted])
@@ -206,6 +225,39 @@ class DraftModelDrafter:
             # all accepted: the cache saw [last, d_1 .. d_{k-1}], d_k still to feed
             self.pending = [int(self.drafts[-1].item())]
         self.snaps = None
+
+
+class HybridDrafter:
+    """Prompt lookup when it finds a long match, the draft model otherwise.
+
+    N-gram drafts are free, so on text that copies from the context (code
+    edits, summaries) this skips the draft model's ~6 ms per drafted token;
+    elsewhere it is the draft model. The draft model is told about the
+    tokens it didn't draft via ``skip`` so its cache stays in sync.
+    """
+
+    def __init__(self, ngram: NgramDrafter, model: DraftModelDrafter, min_len: int = 2):
+        self.ngram, self.model, self.min_len = ngram, model, min_len
+        self.name = f"hybrid({ngram.name}+{model.name})"
+
+    def start(self, prompt, prefill):
+        self.ngram.start(prompt, prefill)
+        self.model.start(prompt, prefill)
+
+    def draft(self, last, k):
+        d = self.ngram.draft(last, k)
+        self.used_ngram = d.size >= min(self.min_len, k)
+        return d if self.used_ngram else self.model.draft(last, k)
+
+    def draft_probs(self):
+        return None if self.used_ngram else self.model.draft_probs()
+
+    def commit(self, out, n_accepted):
+        self.ngram.commit(out, n_accepted)
+        if self.used_ngram:
+            self.model.skip(out.tokens[: n_accepted + 1].tolist())
+        else:
+            self.model.commit(out, n_accepted)
 
 
 # ---------------------------------------------------------------------------
