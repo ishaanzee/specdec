@@ -3,3 +3,4 @@ logs/
 models/
 *.gguf
 __pycache__/
+vendor/
