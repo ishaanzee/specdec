@@ -56,9 +56,10 @@ class SpecModel:
     the same weights can serve the plain baseline.
     """
 
-    def __init__(self, model: nn.Module, rollback: str = "replay"):
+    def __init__(self, model: nn.Module, rollback: str = "replay", async_every: int = 16):
         self.model = model
         self.rollback = rollback
+        self.async_every = async_every
         tm = text_model(model)
         self.lm = tm
         self.inner = tm.model  # Qwen3_5TextModel: embed_tokens, layers, norm
@@ -84,8 +85,14 @@ class SpecModel:
         tokens = tokens.astype(mx.uint32)
         h = self.inner.embed_tokens(tokens[None])
         fa_mask = create_attention_mask(h, cache[self.fa_idx])
-        for layer, c in zip(self.inner.layers, cache):
+        for i, (layer, c) in enumerate(zip(self.inner.layers, cache)):
             h = layer(h, mask=None if layer.is_linear else fa_mask, cache=c)
+            # The loop has to block on every verify result, so unlike plain
+            # decoding it can't hide graph construction behind the previous
+            # step. Submitting the graph in pieces lets the GPU start on the
+            # first layers while Python is still building the rest.
+            if self.async_every and (i + 1) % self.async_every == 0:
+                mx.async_eval(h)
         normed = self.inner.norm(h)
         if self.lm.args.tie_word_embeddings:
             logits = self.inner.embed_tokens.as_linear(normed)

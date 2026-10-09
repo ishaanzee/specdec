@@ -13,8 +13,14 @@ Config strings: ``method[:key=value]...``
 """
 
 import argparse
+import os
 import sys
 import time
+
+# Models must already be downloaded. Without this, mlx_lm.load() asks the Hub
+# for updates and a stalled TLS handshake once hung a run while it held the
+# GPU lock. Set HF_HUB_OFFLINE=0 to allow downloads.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 
 def main(argv=None):
@@ -41,7 +47,7 @@ def main(argv=None):
     v = sub.add_parser("verify-cost", help="target pass time vs number of tokens T")
     v.add_argument("--max-T", type=int, default=17)
     v.add_argument("--reps", type=int, default=7)
-    v.add_argument("--modes", default="replay,capture,reforward")
+    v.add_argument("--modes", default="replay,replay/sync,capture,reforward")
 
     sub.add_parser("mlxlm", help="compare the greedy baseline with mlx_lm.generate")
 

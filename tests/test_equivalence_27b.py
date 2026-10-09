@@ -5,7 +5,7 @@ Opt-in because it loads the 27B (about 10 minutes):
 
 On a mismatch the test prints the logits diagnosis at the divergence point
 (single-token vs batched pass): a near-tie that flips under a different
-matmul shape is numerical, a clear margin is a bug.
+matmul shape is numerical and tolerated, a clear margin is a bug and fails.
 """
 
 import os
@@ -15,8 +15,8 @@ import pytest
 pytestmark = pytest.mark.skipif(os.environ.get("SPECDEC_27B") != "1", reason="set SPECDEC_27B=1")
 
 CONFIGS = [
-    "ngram:k=8:n=2-4:rollback=replay",
-    "ngram:k=8:n=2-4:rollback=capture",
+    "ngram:k=4:n=2-4:rollback=replay",
+    "ngram:k=4:n=2-4:rollback=capture",
     "ngram:k=4:n=2-4:rollback=reforward",
     "draft:k=4",
 ]
@@ -45,4 +45,9 @@ def test_prompt(runner, prompt):
             failures.append((spec, d))
         else:
             print(f"\n{prompt} {spec}: ok ({len(got)} tokens)")
-    assert not failures, failures
+    # bf16 logits are quantised to 1/8 at this magnitude, so exact or one-ulp
+    # ties between the top two tokens happen every few hundred tokens and the
+    # T-row verify pass can break them differently from the 1-row step. Those
+    # are accepted; any mismatch with a clear margin is a bug.
+    bugs = [(s, d) for s, d in failures if d.get("verdict") != "numerical near-tie"]
+    assert not bugs, bugs

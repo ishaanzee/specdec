@@ -60,6 +60,11 @@ from mlx_lm.models.gated_delta import compute_g, gated_delta_kernel, normalize_q
 
 ROLLBACK_MODES = ("replay", "capture", "reforward")
 
+# Capturing every per-token state costs T x 151 MB of memory for Qwen3.8-27B,
+# so "capture" only applies to verify-sized passes; longer passes (prefill)
+# record replay inputs instead. They are committed whole anyway.
+MAX_CAPTURE = 32
+
 
 def _make_capture_kernel():
     """mlx-lm's packed scalar-gate Dk=128 GDN kernel, plus per-token states.
@@ -228,9 +233,9 @@ class LinearCache(ArraysCache):
         self[0] = mx.contiguous(p["conv_input"][:, n_keep : n_keep + n_conv, :])
         if n_keep == 0:
             self[1] = p["state0"]
-        elif self.mode == "capture":
+        elif "states" in p:  # capture
             self[1] = p["states"][:, n_keep - 1]
-        elif self.mode == "replay":
+        elif self.mode != "reforward":  # replay (also capture mode for long passes)
             r = {name: p[name][:, :n_keep] for name in ("q", "k", "v", "g", "beta")}
             _, self[1] = gated_delta_kernel(**r, state=p["state0"])
         else:  # reforward: restore the pre-pass state; SpecModel reruns the tokens
@@ -285,7 +290,7 @@ class RollbackGDN(nn.Module):
         if state0 is None:
             state0 = mx.zeros((B, L.num_v_heads, L.head_v_dim, L.head_k_dim), mx.float32)
 
-        if cache.mode == "capture":
+        if cache.mode == "capture" and S <= MAX_CAPTURE:
             out, states = gated_delta_capture(q, k, v, g, beta, state0)
             cache.record(conv_input, S, state0, states[:, -1], states=states)
         else:
