@@ -13,6 +13,7 @@ MTP_OWN=models/mtp-Qwen3.8-27B-q8_0.gguf
 MTP_OWN_Q4=models/mtp-Qwen3.8-27B-q4_0.gguf
 MTP_GGML_Q4=models/mtp-Qwen3.8-27B-Q4_0-requant-from-ggml-q8.gguf
 M_MTP=models/Qwen3.8-27B-Q4_K_M-mtp.gguf                # single-file Q4_K_M with the MTP layer
+BMM=vendor/llama.cpp/build-mm/bin                       # patched build, see scripts/metal-mm-min-batch.patch
 EXP=${EXP:-llama-mtp-dflash}
 REP=${REP:-1}
 B() { # B <method> <config> <model> -- server args...
@@ -68,6 +69,49 @@ case "${1:-}" in
     B draft-dflash q4-n7-pmin0.5 $M -- -md $DF_Q4 --spec-type draft-dflash --spec-draft-n-max 7 --spec-draft-p-min 0.5
     B draft-dflash q4-n7-pmin0.8 $M -- -md $DF_Q4 --spec-type draft-dflash --spec-draft-n-max 7 --spec-draft-p-min 0.8
     B draft-dflash q4-n3+ngram-simple $M -- -md $DF_Q4 --spec-type draft-dflash,ngram-simple --spec-draft-n-max 3
+    ;;
+  mtp3)
+    # re-measure (the mtp-ggml phase ran while the 54 GB download was decompressing) + our own Q4_0 sidecar
+    B none ref-mtp3 $M -- --spec-type none
+    B draft-mtp own-q8-n2 $M -- -md $MTP_OWN --spec-type draft-mtp --spec-draft-n-max 2
+    for n in 1 2 3; do
+      B draft-mtp own-q4-n$n $M -- -md $MTP_OWN_Q4 --spec-type draft-mtp --spec-draft-n-max $n
+    done
+    B draft-mtp own-q4-n3-pmin0.6 $M -- -md $MTP_OWN_Q4 --spec-type draft-mtp --spec-draft-n-max 3 --spec-draft-p-min 0.6
+    B draft-mtp own-q4-n4-pmin0.6 $M -- -md $MTP_OWN_Q4 --spec-type draft-mtp --spec-draft-n-max 4 --spec-draft-p-min 0.6
+    B draft-mtp own-q4-n2+ngram-simple $M -- -md $MTP_OWN_Q4 --spec-type draft-mtp,ngram-simple --spec-draft-n-max 2
+    "$0" verify-cost2
+    ;;
+  verify-cost2)
+    llama-bench -m $M -ngl 999 -fa 1 -t 6 -p 1,7,8,9,10,12,24,32 -n 0 -r 3 -o md
+    ;;
+  mm-bench)
+    # patched build (scripts/metal-mm-min-batch.patch): forward cost per batch size vs mat-mat threshold
+    for v in 9 2 4 5 6; do
+      echo "--- GGML_METAL_MM_MIN_BATCH=$v"
+      GGML_METAL_MM_MIN_BATCH=$v $BMM/llama-bench -m $M -ngl 999 -fa 1 -t 6 -p 1,2,3,4,5,6,8 -n 0 -r 3 -o md
+    done
+    ;;
+  mm-spec)
+    # spec decoding on the patched server; MMB = GGML_METAL_MM_MIN_BATCH
+    export GGML_METAL_MM_MIN_BATCH=${MMB:-5}
+    BS() { local method=$1 cfg=$2 model=$3; shift 3
+      LLAMA_SERVER=$BMM/llama-server .venv/bin/python bench/llama_bench_server.py --experiment $EXP \
+        --method "$method" --config-name "$cfg" --model "$model" --model-tag Qwen3.8-27B-Q4_K_M --repeat "$REP" "$@" 2>&1 | grep -v '^\['; }
+    BS none mm$MMB-nospec $M -- --spec-type none
+    BS draft-mtp mm$MMB-own-q4-n2 $M -- -md $MTP_OWN_Q4 --spec-type draft-mtp --spec-draft-n-max 2
+    BS draft-mtp mm$MMB-own-q4-n3 $M -- -md $MTP_OWN_Q4 --spec-type draft-mtp --spec-draft-n-max 3
+    for n in 3 5 7; do
+      BS draft-dflash mm$MMB-q4-n$n $M -- -md $DF_Q4 --spec-type draft-dflash --spec-draft-n-max $n
+    done
+    ;;
+  final)
+    # best candidates, repeated (REP=2 by default here), same session
+    REP=${REP_FINAL:-2}
+    B none final-nospec $M -- --spec-type none
+    B draft-mtp final-own-q4-n2+ngram-simple $M -- -md $MTP_OWN_Q4 --spec-type draft-mtp,ngram-simple --spec-draft-n-max 2
+    B draft-dflash final-q4-n2+ngram-simple $M -- -md $DF_Q4 --spec-type draft-dflash,ngram-simple --spec-draft-n-max 2
+    B draft-mtp final-single-n2+ngram-simple $M_MTP -- --spec-type draft-mtp,ngram-simple --spec-draft-n-max 2
     ;;
   splice)
     .venv/bin/python scripts/splice_mtp_gguf.py $M $MTP_GGML $M_MTP

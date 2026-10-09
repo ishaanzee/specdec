@@ -125,3 +125,32 @@ llama-quantize --pure --tensor-type output.weight=q6_k --tensor-type attn_=q8_0 
     --tensor-type 'blk\.64\.'=q8_0  Qwen3.8-27B-mtp-BF16.gguf Qwen3.8-27B-Q4_K_M-mtp.gguf Q4_K_M
 ```
 (untested here; the `blk\.64\.` pattern relies on llama-quantize's regex `--tensor-type` matching).
+
+## Why short drafts win here: verification cost on the M3 Pro
+
+`llama-bench -p B -n 0` on the ggml-org Q4_K_M (stock Homebrew build) = cost of one target forward over B tokens,
+i.e. of verifying B-1 draft tokens:
+
+| B (tokens/forward) | 1 | 2 | 3 | 4 | 5 | 6 | 8 | 16 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| tok/s | 6.57 | 12.41 | 14.12 | 13.15 | 11.81 | 13.75 | 13.71 | 41.11 |
+| ms per forward | 152 | 161 | 212 | 304 | 423 | 436 | 583 | 389 |
+
+A 2-token forward costs about the same as a 1-token one (memory bound), 3 tokens cost 1.4x, but 4-8 tokens cost
+2-3.8x, and a 16-token forward is *cheaper* than an 8-token one. The cause is Metal kernel selection in
+`ggml/src/ggml-metal/ggml-metal-ops.cpp` (`ggml_metal_op_mul_mat`): for K-quant weights, batches 4..8 go to the
+small-batch `mul_mv_ext` kernels (re-reading the weights for every 4-5 src1 rows), batches 1..3 to plain `mul_mv`,
+and only batches > 8 to the simdgroup mat-mat kernel (`ggml_metal_op_mul_mat_use_mm`: `ne11 > 8`). Since every
+verification of n drafted tokens is a forward of B = n+1 tokens, n = 1..2 is nearly free, n = 3 is OK, and n >= 3
+quickly eats the acceptance gains. This is the main reason the optimum is `--spec-draft-n-max 2` for both MTP and
+DFlash, while the H200 numbers in the DFlash2 README use 7.
+
+## Output match vs baseline (and why n >= 3 flips two prompts)
+
+Every config with `--spec-draft-n-max <= 2` reproduces the baseline text exactly on all 6 prompts. Every config
+whose verify batches reach 4 tokens (n_max >= 3, any drafter) changes `explain` (first difference at char 156) and
+`math` (char 55), always at the same places. That is the kernel switch above: 4..8-token batches use
+`mul_mv_ext` for the Q4_K/Q6_K/Q8_0 matmuls, whose different accumulation order changes logits by float rounding,
+and those two prompts have a near-tie at that point. It is not a drafter bug (MTP and DFlash diverge identically,
+and the text stays fluent); it is the "tiny float differences" case the README anticipates. `--spec-draft-p-min`
+configs with n_max 3 only sometimes reach 4-token batches, so they may or may not match.
