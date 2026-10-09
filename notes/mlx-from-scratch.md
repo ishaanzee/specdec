@@ -1,7 +1,7 @@
 # Track B: speculative decoding from scratch in MLX
 
 **Summary.** Our own MLX loop with **Qwen3.5-0.8B (4-bit) as the draft model, k = 3**
-generates at **19.4 tok/s** mean over the six prompts, **2.27x** our MLX greedy
+generates at **19.6 tok/s** mean over the six prompts, **2.28x** our MLX greedy
 baseline (8.56 tok/s) and ~2.9x llama.cpp's plain decode (6.5-6.7 tok/s on the
 same prompts, Track A). Prompt lookup (n-gram) alone gives 1.17x. Rollback of
 the hybrid cache costs ~3.5 ms per partially accepted round (~3% of a verify
@@ -151,13 +151,39 @@ What it means:
   pairwise steps point at the 4-bit `quantized_matmul` dispatch: for few rows
   the matrix-vector kernel streams the weights once and the extra rows ride
   along; beyond 4 rows the cost grows with the row count until the tiled
-  matmul takes over (`bench/mlx_qmm_curve.py` times `quantized_matmul` alone
-  to check this; see below).
+  matmul takes over. Confirmed below by timing `quantized_matmul` alone.
 * So on this machine the useful draft length is **k = 3** (T = 4); k = 4 only
   pays off when acceptance is very high. llama.cpp's built-in defaults (k up
   to 16) are tuned for GPUs where the curve stays flat much longer.
 * This is also why n-gram drafting is weak here: its value is in long free
   drafts, and long drafts aren't cheap on this GPU.
+
+### The staircase is `quantized_matmul`
+
+`bench/mlx_qmm_curve.py` (`results/mlx_qmm_curve.jsonl`) times
+`mx.quantized_matmul` alone (4-bit, group 64, bf16 activations, ~1.5 GB of
+weights per call) for M = 1..32 rows:
+
+| M | MLP up 5120->17408 | x M=1 | eff. GB/s | lm_head 5120->248320 | x M=1 |
+|---|---|---|---|---|---|
+| 1 | 12.9 ms | 1.00 | 114 | 11.6 ms | 1.00 |
+| 4 | 13.1 | 1.02 | 112 | 11.3 | 0.98 |
+| 5 | 14.7 | 1.15 | 100 | 13.6 | 1.18 |
+| 6 | 19.6 | 1.52 | 75 | | |
+| 7-8 | 24.2-24.5 | 1.9 | 60 | 21.3 (M=8) | 1.84 |
+| 9-10 | 31.0 | 2.4 | 47 | | |
+| 11-32 | 36.3-36.9 | 2.84 | 40 | 31.4-31.6 (16, 32) | 2.73 |
+
+Same shape as the full-model curve (1.00 / 1.21 / 1.52 / 1.86 / 2.3 / 2.75-2.9),
+so the matmuls explain it entirely; attention, the GDN kernel and the
+rollback are noise. Up to 4 rows the kernel streams the weights once at
+~113 GB/s. From 11 to 32 rows it takes the same time whatever M is, i.e. it
+is doing a full 32-row tile of work, at 40 GB/s effective. In between the
+cost grows in 2-row steps. For a bandwidth-bound shape like this a kernel
+that keeps the weights-once property up to 8-16 rows (or a qmm with smaller
+row tiles for M = 5..16) would make k = 8-15 verification cost about what
+k = 3 does now. That is the single biggest lever for speculative decoding
+with MLX on this class of machine, and worth an MLX issue/PR.
 
 ### Rollback cost
 
@@ -257,3 +283,105 @@ optional `draft_probs()` for sampling. `out` is the verify pass's
   HF cache) has 15: `mtp.fc`, `mtp.pre_fc_norm_{embedding,hidden}`,
   `mtp.layers.0.*` (one full-attention layer + MLP), `mtp.norm`. The verify
   pass already returns the target hidden states it needs.
+
+## Results
+
+All runs: greedy, thinking off, 256 new tokens (stop at EOS), the six prompts
+of `bench/prompts.jsonl`, `HF_HUB_OFFLINE`, under the GPU lock, repeat 1 plus
+one profiled run per prompt (greedy, ngram k=3 and draft k=3: median of 2,
+re-run in a later session; the two repeats agree within 1% and with the
+earlier single runs within 1-4%) (the profiled run adds a sync per phase and gives
+the time split; its tok/s is within a few % of the timed run). Load average
+(other agents' CPU work) is recorded per row (`loadavg`, 2-4). Rows:
+`results/mlx_{greedy,spec-none,ngram,draft,hybrid}.jsonl`; regenerate this
+table with `.venv/bin/python -m mlx_spec summary`.
+
+| method | config | code_edit | code_gen | summarize | prose | explain | math | mean tok/s | speedup | accept | tok/round |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| greedy | (baseline) | 8.55 | 8.56 | 8.54 | 8.57 | 8.58 | 8.58 | **8.56** | 1.00x | - | - |
+| spec-none | k=0 (loop overhead) | 8.49 | 8.34 | 8.48 | 8.29 | 8.35 | 8.21 | **8.36** | 0.98x | - | 1.00 |
+| ngram | k=2, n=2-4 | 11.87 | 8.78 | 11.04 | 8.48 | 9.07 | 10.04 | **9.88** | 1.15x | 0.34 | 1.19 |
+| ngram | k=3, n=2-4 | 12.14 | 8.63 | 11.63 | 8.49 | 8.90 | 10.05 | **9.97** | 1.16x | 0.27 | 1.22 |
+| ngram | k=4, n=2-4 | 11.90 | 8.42 | 11.38 | 8.51 | 8.90 | 9.89 | **9.83** | 1.15x | 0.24 | 1.24 |
+| ngram | k=4, n=1-4 | 13.21 | 8.53 | 11.44 | 8.18 | 8.74 | 10.33 | **10.07** | 1.18x | 0.14 | 1.35 |
+| ngram | k=5, n=2-4 | 11.10 | 8.05 | 10.77 | 8.30 | 8.28 | 9.32 | **9.30** | 1.09x | 0.20 | 1.24 |
+| ngram | k=8, n=2-4 | 10.10 | 7.67 | 9.87 | 8.04 | 8.01 | 8.14 | **8.64** | 1.01x | 0.15 | 1.26 |
+| draft 0.8B-4bit | k=2 | 20.61 | 18.57 | 17.86 | 13.08 | 16.50 | 19.16 | **17.63** | 2.06x | 0.69 | 2.39 |
+| draft 0.8B-4bit | **k=3** | 24.27 | 21.27 | 18.98 | 14.05 | 17.39 | 21.38 | **19.56** | **2.28x** | 0.60 | 2.80 |
+| draft 0.8B-4bit | k=4 | 25.56 | 21.35 | 18.98 | 12.11 | 16.45 | 20.09 | **19.09** | 2.23x | 0.55 | 3.20 |
+| draft 0.8B-4bit | k=2..4 adaptive | 24.89 | 20.72 | 18.77 | 13.25 | 16.98 | 20.15 | **19.13** | 2.23x | 0.58 | 3.02 |
+| draft 2B-8bit | k=3 | 20.00 | 17.41 | 17.00 | 11.67 | 15.30 | 18.95 | **16.72** | 1.95x | 0.68 | 3.03 |
+| hybrid (ngram n3-4 + 0.8B) | k=3 | 23.91 | 20.92 | 19.00 | 13.96 | 17.65 | 19.94 | **19.23** | 2.25x | 0.57 | 2.71 |
+| hybrid | k=2..4 adaptive | 23.80 | 19.92 | 18.40 | 13.32 | 16.77 | 19.58 | **18.63** | 2.18x | 0.55 | 2.92 |
+
+Rollback strategy, end to end (same drafts, so same acceptance):
+
+| drafter | replay | capture | reforward |
+|---|---|---|---|
+| ngram k=4, n=2-4 | 9.83 | 9.72 | 8.47 |
+| draft 0.8B k=3 | 19.42 (19.56 re-run) | 18.99 | 14.07 |
+
+Time split, draft 0.8B k=3 (profiled runs): per round ~123 ms verify (T=4),
+~19 ms drafting (3 x 6.3 ms), 2-4 ms rollback on rejecting rounds; verify is
+~85% of the time. E.g. code_gen: 84 rounds, acceptance histogram
+[17, 9, 12, 46] (rounds with 0/1/2/3 drafts accepted), draft 1.6 s,
+verify 10.3 s, rollback 0.2 s of 12.1 s.
+
+Reading it:
+
+* **The draft model is the winner**: Qwen3.5-0.8B agrees with Qwen3.8-27B on
+  55-88% of drafted tokens (prose lowest at 34-39%), and a 4-token verify is
+  only 4% dearer than a decode step, so a round yields 2.8 tokens for ~1.2
+  steps' worth of time. 2B-8bit accepts more (0.68 vs 0.60) but drafts at
+  ~15 ms/token, a net loss.
+* k = 3 is the sweet spot because of the verify curve (T = 4 is the last
+  cheap width). k = 4 wins only on code_edit (88% acceptance); adaptive k
+  doesn't beat fixed k = 3.
+* N-gram alone: +15-18%, nearly all from code_edit / summarize / math, where
+  the answer copies from the prompt; ~0 on prose / explain / code_gen. Short
+  drafts (k = 2-3) beat long ones; k = 8 loses everything it gains to the
+  wider verify. Same story as Track A's llama.cpp n-gram results.
+* The hybrid (free n-gram drafts when the context has a long match) doesn't
+  add anything over the draft model: on code_edit the 0.8B already predicts
+  the copied spans, and drafting costs only ~13% of a round.
+* Prompt processing is the same for all methods (35-305 token prompts,
+  52-93 tok/s depending on length); the draft model's own prefill costs
+  ~2% of it.
+
+## Dead ends and gotchas
+
+* A run on a busy machine is worthless: the first benchmark pass (session 1)
+  overlapped the end of the 54 GB bf16 download (greedy 7.3 tok/s instead of
+  8.56) and then another agent's torch job; n-gram rounds suddenly cost
+  210 ms instead of 125 ms. Those rows were discarded
+  (`logs/contaminated/`), and rows now record `loadavg`.
+* `mlx_lm.load` checks the Hub for updates; once a stalled TLS handshake hung a
+  run for 10 minutes *while holding the GPU lock*. The CLI now defaults to
+  `HF_HUB_OFFLINE=1`.
+* `capture` during prefill tried to write 305 x 151 MB of states and hit
+  Metal OOM; it now only captures passes of <= 32 tokens.
+* `scripts/gpu.py` opens the lock file with `"w"`, so every waiting process
+  truncates the holder's "pid cmd" line; the lock itself works.
+
+## Next steps
+
+1. **MTP drafter** on the interface (plan in `MTPDrafter`). It needs no
+   second model, its drafting is one small layer instead of a 0.8B model
+   (~1-2 ms vs ~6 ms per token), and k = 1-3 is exactly the cheap verify
+   range here. Weights are in the bf16 `Qwen/Qwen3.8-27B` download.
+2. **A wider cheap verify**: the staircase above T = 4 is the main limit on
+   every method. If `quantized_matmul` could stream the weights once for up to
+   ~8-16 rows (the work is bandwidth-bound: 15 GB at ~130 GB/s ≈ 115 ms no
+   matter the row count), k = 6-8 would cost about what k = 3 does now, and
+   both n-gram and DFlash (block drafts of 16) would benefit. See the
+   `quantized_matmul` section above.
+3. **DFlash** (`z-lab/Qwen3.8-27B-DFlash2`, downloaded): block-diffusion
+   drafts from target hidden states; same interface, but it wants large k,
+   so it depends on (2).
+4. Defer the replay into the next pass (run the kept tokens' recurrence as
+   the first steps of the next verify's kernel call) to save the ~3.5 ms
+   rollback read/write; small (~2%).
+5. Fewer bf16 flips: computing lm_head with fp32 output (in both baseline
+   and verify) would remove the exact ties (several divergences had batched
+   margin 0.0, broken by token id), but not the ~0.15-logit batched-vs-single
+   noise from the trunk, so some near-ties would still flip.

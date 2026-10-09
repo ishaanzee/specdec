@@ -7,10 +7,12 @@ architecture, and the drafters. Design notes, measurements and results are in
 `notes/mlx-from-scratch.md`.
 
 ```
-scripts/gpu.py .venv/bin/python -m mlx_spec generate --config ngram:k=8 --prompt-id code_edit --profile
-scripts/gpu.py .venv/bin/python -m mlx_spec bench --configs greedy ngram:k=8:n=2-4 draft:k=4 --repeat 2
+scripts/gpu.py .venv/bin/python -m mlx_spec generate --config draft:k=3 --prompt-id code_edit --profile
+scripts/gpu.py .venv/bin/python -m mlx_spec bench --configs greedy ngram:k=3 draft:k=3 --repeat 2
 scripts/gpu.py .venv/bin/python -m mlx_spec verify-cost
 scripts/gpu.py .venv/bin/python -m pytest tests/test_tiny.py -q                       # seconds
+.venv/bin/python -m pytest tests/test_sampling.py -q                                  # CPU only, 2 min
+.venv/bin/python -m mlx_spec summary                                                  # results table
 SPECDEC_27B=1 scripts/gpu.py .venv/bin/python -m pytest tests/test_equivalence_27b.py -q -s
 ```
 
@@ -18,9 +20,15 @@ SPECDEC_27B=1 scripts/gpu.py .venv/bin/python -m pytest tests/test_equivalence_2
 |---|---|
 | `gdn.py` | `RollbackGDN` (wraps each gated-delta layer), `LinearCache` (its rewindable cache), the per-token-state capture kernel |
 | `model.py` | `SpecModel`: `forward(tokens, cache) -> ForwardOutput(logits, hidden, normed)`, `prefill`, `commit(cache, n_keep)` |
-| `drafters.py` | `Drafter` protocol, `NgramDrafter`, `DraftModelDrafter`, `NoDrafter`, `MTPDrafter` plan |
+| `drafters.py` | `Drafter` protocol, `NgramDrafter`, `DraftModelDrafter` (optionally adaptive k), `HybridDrafter`, `NoDrafter`, `MTPDrafter` plan |
 | `decode.py` | `greedy_generate` (baseline), `speculative_generate` (the loop) |
 | `bench.py` | results rows in the shared schema, verify-cost curve, mismatch diagnosis |
+
+Sampling: `speculative_generate(..., temperature=t)` does exact speculative
+sampling (accept with `min(1, p/q)`, resample from `max(p - q, 0)`), with
+`q` from `drafter.draft_probs()` or one-hot for deterministic drafters;
+`tests/test_sampling.py` checks the output distribution. Greedy is the
+benchmarked path.
 
 ## Rollback in one paragraph
 

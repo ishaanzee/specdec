@@ -98,7 +98,8 @@ class Runner:
         if m in ("draft", "hybrid"):
             name = cfg.get("model", "mlx-community/Qwen3.5-0.8B-MLX-4bit")
             k_min = int(cfg["kmin"]) if "kmin" in cfg else None
-            d = DraftModelDrafter(self.draft_model(name), name=name, k_min=k_min)
+            d = DraftModelDrafter(self.draft_model(name), name=name, k_min=k_min,
+                                  temperature=float(cfg.get("temp", 0.0)))
             if m == "draft":
                 return d
             lo, hi = (int(x) for x in cfg.get("n", "3-4").split("-"))
@@ -117,6 +118,7 @@ class Runner:
             eos=self.eos,
             profile=profile,
             rollback=cfg.get("rollback", "replay"),
+            temperature=float(cfg.get("temp", 0.0)),
         )
 
     def warmup(self, cfg):
@@ -335,11 +337,10 @@ def summary_table(paths=None) -> str:
     paths = paths or sorted((ROOT / "results").glob("mlx_*.jsonl"))
     rows = OrderedDict()
     for path in paths:
-        if path.name == "mlx_verify_cost.jsonl":
-            continue
         for line in open(path):
             r = json.loads(line)
-            rows[(r["method"], r["config"], r["prompt_id"])] = r
+            if "prompt_id" in r:  # skip verify-cost / qmm-curve rows
+                rows[(r["method"], r["config"], r["prompt_id"])] = r
     groups = OrderedDict()
     for (m, c, _), r in rows.items():
         groups.setdefault((m, c), []).append(r)

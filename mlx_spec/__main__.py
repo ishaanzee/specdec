@@ -10,7 +10,9 @@ Config strings: ``method[:key=value]...``
   greedy                          plain greedy decode (stock mlx-lm caches)
   spec-none[:rollback=..]         speculative loop with an empty drafter (overhead check)
   ngram[:k=8][:n=2-4][:rollback=replay|capture|reforward]
-  draft[:k=4][:model=mlx-community/Qwen3.5-0.8B-MLX-4bit][:rollback=..]
+  draft[:k=4][:model=mlx-community/Qwen3.5-0.8B-MLX-4bit][:kmin=2][:rollback=..]
+  hybrid[:k=3][:n=3-4]            n-gram when it matches, else the draft model
+  any spec config [:temp=0.7]     exact speculative sampling instead of greedy
 """
 
 import argparse
