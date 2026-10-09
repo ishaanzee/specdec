@@ -108,7 +108,6 @@ class Runner:
     def run(self, cfg, prompt_ids, max_tokens, profile=False) -> GenResult:
         if cfg["method"] == "greedy":
             return greedy_generate(self.model, prompt_ids, max_tokens, self.eos)
-        self.spec.async_every = int(cfg.get("async", 16))
         return speculative_generate(
             self.spec,
             self.make_drafter(cfg),
@@ -203,8 +202,7 @@ class Runner:
 
 
 # ------------------------------------------------------- verify cost vs k
-def verify_cost(runner: Runner, Ts=range(1, 18), reps=7,
-                modes=("replay", "replay/sync", "capture", "reforward"),
+def verify_cost(runner: Runner, Ts=range(1, 18), reps=7, modes=("replay", "capture", "reforward"),
                 write=True):
     """Time one target pass over T tokens (+ argmax) and the rollback after it.
 
@@ -233,10 +231,7 @@ def verify_cost(runner: Runner, Ts=range(1, 18), reps=7,
     print(f"stock mlx-lm decode step (T=1): {stock_ms:.1f} ms", flush=True)
     del cache, snap
 
-    for variant in modes:
-        # "replay/sync": replay rollback with one graph submission per pass
-        mode, _, sync = variant.partition("/")
-        spec.async_every = 0 if sync else 16
+    for mode in modes:
         cache = spec.make_cache(mode)
         spec.prefill(mx.array(ids, mx.uint32), cache)
         snap = snapshot(cache)  # primed position; restored after every sample
@@ -260,7 +255,7 @@ def verify_cost(runner: Runner, Ts=range(1, 18), reps=7,
                     r_times.append(t_r - t_v)
                     b_times.append(t_b - t)
             row = {
-                "track": "B", "experiment": "verify_cost", "rollback": variant, "T": T, "k": T - 1,
+                "track": "B", "experiment": "verify_cost", "rollback": mode, "T": T, "k": T - 1,
                 "verify_ms": round(1e3 * statistics.median(v_times), 2),
                 "verify_ms_min": round(1e3 * min(v_times), 2),
                 "rollback_ms": round(1e3 * statistics.median(r_times), 2),
@@ -274,12 +269,11 @@ def verify_cost(runner: Runner, Ts=range(1, 18), reps=7,
             if write:
                 with open(ROOT / "results" / "mlx_verify_cost.jsonl", "a") as f:
                     f.write(json.dumps(row) + "\n")
-            print(f"{variant:<11} T={T:<3} verify {row['verify_ms']:7.1f} ms  "
+            print(f"{mode:<9} T={T:<3} verify {row['verify_ms']:7.1f} ms  "
                   f"({row['verify_ms'] / stock_ms:4.2f}x decode)  rollback {row['rollback_ms']:6.2f} ms",
                   flush=True)
         del cache, snap, out
         mx.clear_cache()
-    spec.async_every = 16
     return rows
 
 

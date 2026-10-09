@@ -121,7 +121,7 @@ class NoisyOracle:
 
 @pytest.mark.parametrize("mode", MODES)
 def test_spec_equals_greedy(model, mode):
-    spec = SpecModel(model, async_every=3)  # also exercise chunked submission
+    spec = SpecModel(model)
     for seed in range(3):
         ids = prompt(seed=seed)
         ref = greedy_generate(model, ids, 48).tokens

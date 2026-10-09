@@ -48,7 +48,7 @@ def main(argv=None):
     v = sub.add_parser("verify-cost", help="target pass time vs number of tokens T")
     v.add_argument("--max-T", type=int, default=17)
     v.add_argument("--reps", type=int, default=7)
-    v.add_argument("--modes", default="replay,replay/sync,capture,reforward")
+    v.add_argument("--modes", default="replay,capture,reforward")
 
     sub.add_parser("mlxlm", help="compare the greedy baseline with mlx_lm.generate")
     sub.add_parser("summary", help="markdown table of results/mlx_*.jsonl (no model)")

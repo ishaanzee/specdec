@@ -1,5 +1,14 @@
 # Track B: speculative decoding from scratch in MLX
 
+**Summary.** Our own MLX loop with **Qwen3.5-0.8B (4-bit) as the draft model, k = 3**
+generates at **19.4 tok/s** mean over the six prompts, **2.27x** our MLX greedy
+baseline (8.56 tok/s) and ~2.9x llama.cpp's plain decode (6.5-6.7 tok/s on the
+same prompts, Track A). Prompt lookup (n-gram) alone gives 1.17x. Rollback of
+the hybrid cache costs ~3.5 ms per partially accepted round (~3% of a verify
+pass) with the `replay` strategy. Greedy outputs equal plain greedy
+token-for-token in float32; in bf16, 13 of 24 prompt x config runs diverge at
+one-ulp logit ties (diagnosed one by one), never with a clear margin.
+
 Code: `mlx_spec/` (README there). mlx-lm 0.32.0 supplies the model definition
 (`mlx_lm/models/qwen3_5.py`), weights, tokenizer and cache classes; the decode
 loop, drafting, verification, acceptance and rollback are ours. Target:
@@ -76,3 +85,102 @@ The draft model (Qwen3.5-0.8B, also a GDN hybrid) is rolled back differently:
 it decodes one token per step, so snapshotting its cache after every step is
 free (MLX arrays are immutable values; a snapshot is a list of references
 plus KV offsets) and commit restores the right one (`drafters.snapshot/restore`).
+
+## Baseline (`decode.greedy_generate`)
+
+Prefill the prompt in one pass, then one token per step with mlx-lm's
+pipelining pattern (queue step i+1 with `mx.async_eval` before blocking on
+token i). Timing follows llama-server's `timings`: prompt phase = prefill +
+first token; `gen_tok_s = n_gen / gen_time` with the first token counted, as
+`predicted_per_second` does. The weights are wired
+(`mx.set_wired_limit(max_recommended_working_set_size)`, as `mlx_lm.generate`
+does).
+
+* vs `mlx_lm.stream_generate` on the same prompts (`logs/mlx_mlxlm_compare.log`,
+  measured while a 54 GB download was running, so absolute numbers are low):
+  ours 7.26-7.47 tok/s, mlx-lm 6.99-7.53, mean 7.34 vs 7.31. Same tokens on 4/6
+  prompts; the other 2 diverge late because mlx-lm prefills `prompt[:-1]` and
+  then the last token separately (different batching, bf16 near-tie), while we
+  prefill the whole prompt in one pass like llama.cpp.
+* Clean run (`results/mlx_greedy.jsonl`): **8.56 tok/s** mean, 8.53-8.59 per
+  prompt, prompt processing ~85-90 tok/s. That is 117 ms per token for 15 GB
+  of weights, ~130 GB/s effective.
+* Thinking is off: the template with `enable_thinking=False` renders
+  `<|im_start|>assistant\n<think>\n\n</think>\n\n`, and every output starts
+  directly with the answer (checked the decoded texts; no `<think>`).
+* Comparison with llama.cpp (Track A, `results/llama-ngram-draft.jsonl`
+  baseline rows): 6.3-6.7 tok/s for Q4_K_M. MLX's 4-bit file is smaller
+  (15 GB vs 19 GB: ggml-org's Q4_K_M keeps attention/SSM tensors in Q8_0), which
+  accounts for most of the gap.
+
+## Verify cost vs k: the curve that explains everything
+
+`python -m mlx_spec verify-cost` (`results/mlx_verify_cost.jsonl`): one target
+pass over T = k + 1 tokens + argmax, cache primed with a 305-token prompt and
+restored after every sample, median of 7. "verify" includes building the graph
+(1.6 ms) and the sync.
+
+| T | k | verify ms | x T=1 | capture verify | replay rollback ms | capture rollback ms | reforward rollback ms |
+|---|---|---|---|---|---|---|---|
+| 1 | 0 | 119.7 | 1.00 | 118.1 | - | - | - |
+| 2 | 1 | 122.1 | 1.02 | 120.6 | 3.38 | 0.55 | 112.5 |
+| 3 | 2 | 123.4 | 1.03 | 124.4 | 3.36 | 0.54 | 113.6 |
+| 4 | 3 | 124.4 | 1.04 | 127.6 | 3.40 | 0.61 | 114.0 |
+| 5 | 4 | 145.4 | 1.21 | 152.2 | 3.48 | 1.78 | 115.9 |
+| 6 | 5 | 181.7 | 1.52 | 190.7 | 3.47 | 3.56 | 115.9 |
+| 7 | 6 | 221.7 | 1.85 | 230.1 | 3.60 | 0.62 | 117.3 |
+| 8 | 7 | 223.2 | 1.86 | 230.8 | 3.58 | 0.55 | 117.3 |
+| 9 | 8 | 273.6 | 2.29 | 281.8 | 3.70 | 0.58 | 137.5 |
+| 10 | 9 | 275.0 | 2.30 | 285.2 | 3.63 | 0.57 | 137.5 |
+| 11 | 10 | 327.0 | 2.73 | 337.4 | 3.75 | 0.61 | 171.5 |
+| 12 | 11 | 328.7 | 2.75 | 334.4 | 3.77 | 0.65 | 171.5 |
+| 13 | 12 | 344.7 | 2.88 | 355.1 | 3.80 | 0.76 | 209.4 |
+| 14-16 | 13-15 | 345 | 2.89 | 355-359 | 3.8-4.0 | 0.8 | 210 |
+| 17 | 16 | 347.9 | 2.91 | 367.3 | 4.02 | 2.46 | 258.8 |
+
+(rollback keeps `ceil(T/2)` tokens. The `replay` rows with chunked async
+submission were measured while a CPU-heavy test of mine was running and are
+left out; the "verify" column is the `replay/sync` variant. Plain stock
+mlx-lm single-token step in the same conditions: ~118-120 ms.)
+
+What it means:
+
+* **T <= 4 is (almost) free**: verifying 3 drafts costs 4% more than decoding
+  one token. Then the price climbs in steps: +21% at T=5, +52% at 6, 1.85x at
+  7-8, 2.3x at 9-10, 2.75x at 11-12, and a plateau of ~2.9x from 13 on. The
+  pairwise steps point at the 4-bit `quantized_matmul` dispatch: for few rows
+  the matrix-vector kernel streams the weights once and the extra rows ride
+  along; beyond 4 rows the cost grows with the row count until the tiled
+  matmul takes over (`bench/mlx_qmm_curve.py` times `quantized_matmul` alone
+  to check this; see below).
+* So on this machine the useful draft length is **k = 3** (T = 4); k = 4 only
+  pays off when acceptance is very high. llama.cpp's built-in defaults (k up
+  to 16) are tuned for GPUs where the curve stays flat much longer.
+* This is also why n-gram drafting is weak here: its value is in long free
+  drafts, and long drafts aren't cheap on this GPU.
+
+### Rollback cost
+
+* `replay`: 3.4-4.0 ms per round with a rejection (read + write of the 151 MB
+  of recurrent state plus 48 kernel launches), ~3% of a verify pass, and only
+  paid on partial acceptance. Default.
+* `capture`: rollback 0.5 ms, but the verify pass writes `T x 151 MB` more
+  (+1 to +3 ms at T=2-4, +8 ms at T=8, +14 ms at T=16) on every round. At the
+  useful T <= 4 it's a wash with replay; it gets worse with k and needs
+  `T x 151 MB` of scratch memory (it OOM'd on a 305-token prefill before
+  capture was limited to passes of <= 32 tokens).
+* `reforward`: 112-260 ms (a whole extra target pass), i.e. a rejected round
+  costs double. End-to-end with n-gram k=4 it is 8.47 tok/s vs 9.83 (replay)
+  and 9.72 (capture); it is there as the reference implementation.
+
+### Loop overhead
+
+`spec-none` (the speculative loop with an empty drafter: one token per round,
+blocking on every round, no `async_eval` pipelining) runs at 8.36 tok/s vs
+8.56 for the pipelined greedy loop: 2.3% overhead. Graph construction is only
+~1.6 ms per pass. I tried submitting the verify graph in chunks
+(`mx.async_eval` every 16 layers, so the GPU starts while Python builds the
+rest): 8.37 vs 8.36 tok/s, no difference, so it was removed again. (In
+`results/mlx_verify_cost.jsonl`, `replay/sync` = replay without chunking,
+`replay` = with chunking, measured under CPU contention; `capture` and
+`reforward` rows used chunking.)
