@@ -56,7 +56,8 @@ from typing import Optional
 import mlx.core as mx
 import mlx.nn as nn
 from mlx_lm.models.cache import ArraysCache
-from mlx_lm.models.gated_delta import compute_g, gated_delta_kernel, normalize_qk
+from mlx_lm.models.gated_delta import (compute_g, gated_delta_kernel, gated_delta_ops,
+                                       normalize_qk)
 
 ROLLBACK_MODES = ("replay", "capture", "reforward")
 
@@ -198,6 +199,14 @@ def gated_delta_capture(q, k, v, g, beta, state):
     )
 
 
+def recurrence(q, k, v, g, beta, state):
+    """The GDN recurrence exactly as mlx-lm runs it: Metal kernel on the GPU,
+    the ops reference elsewhere (lets the tiny-model tests run on the CPU)."""
+    if mx.default_device() == mx.gpu and mx.metal.is_available():
+        return gated_delta_kernel(q, k, v, g, beta, state)
+    return gated_delta_ops(q, k, v, g, beta, state)
+
+
 class LinearCache(ArraysCache):
     """``ArraysCache(size=2)`` for one GDN layer that can be rewound.
 
@@ -237,7 +246,7 @@ class LinearCache(ArraysCache):
             self[1] = p["states"][:, n_keep - 1]
         elif self.mode != "reforward":  # replay (also capture mode for long passes)
             r = {name: p[name][:, :n_keep] for name in ("q", "k", "v", "g", "beta")}
-            _, self[1] = gated_delta_kernel(**r, state=p["state0"])
+            _, self[1] = recurrence(**r, state=p["state0"])
         else:  # reforward: restore the pre-pass state; SpecModel reruns the tokens
             self[0] = mx.contiguous(p["conv_input"][:, :n_conv, :])
             self[1] = p["state0"]
@@ -294,7 +303,7 @@ class RollbackGDN(nn.Module):
             out, states = gated_delta_capture(q, k, v, g, beta, state0)
             cache.record(conv_input, S, state0, states[:, -1], states=states)
         else:
-            out, state = gated_delta_kernel(q, k, v, g, beta, state0)
+            out, state = recurrence(q, k, v, g, beta, state0)
             cache.record(conv_input, S, state0, state, q=q, k=k, v=v, g=g, beta=beta)
 
         out = L.norm(out, z)

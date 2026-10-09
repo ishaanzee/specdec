@@ -20,6 +20,10 @@ Invariants the drafter can rely on:
 * ``draft`` may return fewer than ``k`` tokens (even zero: the round then
   degenerates to a normal one-token decode step). It returns a 1-D ``mx.array``
   and may leave it lazy; the loop evaluates it together with the verify pass.
+* Optional, for sampling (temperature > 0): ``draft_probs()`` returns the
+  ``[n_drafts, V]`` distributions the drafts were sampled from. Drafters
+  without it are treated as deterministic proposals (one-hot q), which is
+  also exact.
 * ``commit(out, n)`` receives the target's ``ForwardOutput`` for the verified
   pass: ``out.tokens`` = ``[last] + drafts``, and ``out.hidden`` /
   ``out.normed`` / ``out.logits`` rows ``0..n`` belong to committed tokens
@@ -149,10 +153,14 @@ class DraftModelDrafter:
     ``self.pending + [last]``.
     """
 
-    def __init__(self, model, name: str = "draft", prefill_step: int = 2048):
+    def __init__(self, model, name: str = "draft", prefill_step: int = 2048,
+                 temperature: float = 0.0):
         self.model = model
         self.name = name
         self.prefill_step = prefill_step
+        # > 0: sample drafts from the draft model and expose their distributions
+        # (draft_probs) for exact speculative sampling; 0: greedy drafts.
+        self.temperature = temperature
 
     def start(self, prompt, prefill):
         self.cache = make_prompt_cache(self.model)
@@ -165,18 +173,27 @@ class DraftModelDrafter:
     def draft(self, last, k):
         if k <= 0:
             self.pending.append(last)
-            self.snaps = None
+            self.snaps, self.q = None, []
             return EMPTY
         x = mx.array(self.pending + [last], mx.uint32)
         self.pending = []
-        self.snaps, out = [], []
+        self.snaps, out, self.q = [], [], []
         for _ in range(k):
             logits = self.model(x[None], cache=self.cache)
             self.snaps.append(snapshot(self.cache))  # consumed context + drafts so far
-            x = mx.argmax(logits[0, -1:], axis=-1).astype(mx.uint32)
+            if self.temperature > 0:
+                lp = logits[0, -1:].astype(mx.float32) / self.temperature
+                self.q.append(mx.softmax(lp, axis=-1))
+                x = mx.random.categorical(lp).astype(mx.uint32)
+            else:
+                x = mx.argmax(logits[0, -1:], axis=-1).astype(mx.uint32)
             out.append(x)
         self.drafts = mx.concatenate(out)
         return self.drafts
+
+    def draft_probs(self):
+        """[k, V] distributions the last drafts were sampled from (None if greedy)."""
+        return mx.concatenate(self.q) if self.temperature > 0 and self.q else None
 
     def commit(self, out, n_accepted):
         if self.snaps is None:

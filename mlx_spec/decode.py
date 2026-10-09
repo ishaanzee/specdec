@@ -103,6 +103,36 @@ def greedy_generate(
     return GenResult(tokens, len(prompt), t1 - t0, t2 - t1)
 
 
+def _sample_verify(logits, drafts, q, temperature):
+    """Speculative sampling (Leviathan et al. / Chen et al.), vectorised.
+
+    ``logits`` [T, V] from the verify pass, ``drafts`` [k] (k = T - 1),
+    ``q`` [k, V] the draft distributions or None for a deterministic
+    proposal (n-gram), i.e. one-hot q. Draft i is accepted with probability
+    ``min(1, p_i(d_i) / q_i(d_i))``; the first rejected position is resampled
+    from ``norm(max(p_i - q_i, 0))``; if all are accepted a bonus token is
+    sampled from ``p_k``. Returns lazy ``(accept [k] bool, fix [k], bonus [1])``;
+    the caller finds the first rejection on the CPU. The emitted tokens are
+    distributed exactly as sampling the target alone at ``temperature``.
+    """
+    p = mx.softmax(logits.astype(mx.float32) / temperature, axis=-1)
+    k = drafts.size
+    bonus = mx.random.categorical(mx.log(p[k:]))
+    if k == 0:
+        return None, None, bonus
+    rows = mx.arange(k)
+    px = p[rows, drafts]
+    if q is None:  # one-hot proposal: accept w.p. p(d), residual = p without d
+        ratio = px
+        resid = mx.where(mx.arange(p.shape[-1])[None] == drafts[:, None], 0.0, p[:k])
+    else:
+        ratio = px / q[rows, drafts]
+        resid = mx.maximum(p[:k] - q, 0.0)
+    accept = mx.random.uniform(shape=(k,)) < mx.minimum(ratio, 1.0)
+    fix = mx.random.categorical(mx.log(resid))
+    return accept, fix, bonus
+
+
 def speculative_generate(
     spec: SpecModel,
     drafter: Drafter,
@@ -112,27 +142,38 @@ def speculative_generate(
     eos: Sequence[int] = (),
     profile: bool = False,
     rollback: Optional[str] = None,
+    temperature: float = 0.0,
 ) -> GenResult:
-    """Greedy speculative decoding; output equals greedy decoding of ``spec``.
+    """Speculative decoding; output equals decoding ``spec`` alone.
 
-    Each round: the drafter proposes up to ``k`` tokens following ``last``;
-    the target runs ONE pass over ``[last] + drafts`` (T = 1 + len(drafts));
-    ``target[i] = argmax(logits[i])`` is the target's choice after
-    ``[.., last, d_1 .. d_i]``. Accept the longest prefix with
-    ``d_{i+1} == target[i]``, say ``n`` drafts, then emit ``d_1 .. d_n`` plus
-    ``target[n]`` (the correction, or the bonus token when all ``k`` were
-    accepted). The cache keeps ``n + 1`` of the ``T`` tokens (``last`` and
-    the accepted drafts); ``target[n]`` becomes the next ``last``.
+    Greedy (``temperature == 0``), each round: the drafter proposes up to
+    ``k`` tokens following ``last``; the target runs ONE pass over
+    ``[last] + drafts`` (T = 1 + len(drafts)); ``target[i] = argmax(logits[i])``
+    is the target's choice after ``[.., last, d_1 .. d_i]``. Accept the longest
+    prefix with ``d_{i+1} == target[i]``, say ``n`` drafts, then emit
+    ``d_1 .. d_n`` plus ``target[n]`` (the correction, or the bonus token when
+    all ``k`` were accepted). The cache keeps ``n + 1`` of the ``T`` tokens
+    (``last`` and the accepted drafts); ``target[n]`` becomes the next
+    ``last``.
+
+    ``temperature > 0`` uses exact speculative sampling (``_sample_verify``)
+    instead of the argmax comparison; everything else is identical. Drafters
+    with a distribution expose it via ``draft_probs()``; others are treated
+    as deterministic proposals.
 
     ``profile=True`` synchronises after each phase so ``draft_s``,
     ``verify_s`` and ``rollback_s`` are attributable; leave it off for tok/s.
     """
+    sample = temperature > 0
     cache = spec.make_cache(rollback)
     p = mx.array(prompt, mx.uint32)
     mx.synchronize()
     t0 = time.perf_counter()
     pre = spec.prefill(p, cache)
-    last = mx.argmax(pre.logits[-1], axis=-1).item()
+    if sample:
+        last = mx.random.categorical(pre.logits[-1].astype(mx.float32) / temperature).item()
+    else:
+        last = mx.argmax(pre.logits[-1], axis=-1).item()
     drafter.start(prompt, pre)
     t1 = time.perf_counter()
 
@@ -141,24 +182,34 @@ def speculative_generate(
     while not done:
         tic = time.perf_counter()
         kk = min(k, max_tokens - len(res.tokens) - 1)
-        drafts = drafter.draft(last, kk)
+        drafts = drafter.draft(last, kk).astype(mx.uint32)
         if profile:
             mx.eval(drafts)
             t_draft = time.perf_counter()
             res.draft_s += t_draft - tic
 
-        inp = mx.concatenate([mx.array([last], mx.uint32), drafts.astype(mx.uint32)])
+        inp = mx.concatenate([mx.array([last], mx.uint32), drafts])
         out = spec.forward(inp, cache)
-        target = mx.argmax(out.logits, axis=-1)
-        mx.eval(target, drafts)
-        target, drafts = target.tolist(), drafts.tolist()
+        if sample:
+            q = drafter.draft_probs() if hasattr(drafter, "draft_probs") else None
+            accept, fix, bonus = _sample_verify(out.logits, drafts, q, temperature)
+            mx.eval([a for a in (accept, fix, bonus, drafts) if a is not None])
+            drafts = drafts.tolist()
+            acc = accept.tolist() if accept is not None else []
+            n = acc.index(False) if False in acc else len(drafts)
+            nxt = fix[n].item() if n < len(drafts) else bonus.item()
+        else:
+            target = mx.argmax(out.logits, axis=-1)
+            mx.eval(target, drafts)
+            target, drafts = target.tolist(), drafts.tolist()
+            n = 0
+            while n < len(drafts) and drafts[n] == target[n]:
+                n += 1
+            nxt = target[n]
         if profile:
             t_verify = time.perf_counter()
             res.verify_s += t_verify - t_draft
 
-        n = 0
-        while n < len(drafts) and drafts[n] == target[n]:
-            n += 1
         rerun = spec.commit(cache, n + 1, out)
         drafter.commit(rerun or out, n)
         if profile:
@@ -171,8 +222,7 @@ def speculative_generate(
         if len(drafts):
             res.accept_hist += [0] * (n + 1 - len(res.accept_hist))
             res.accept_hist[n] += 1
-        new = drafts[:n] + [target[n]]
-        res.tokens, done = _finish(res.tokens + new, eos, max_tokens)
-        last = target[n]
+        res.tokens, done = _finish(res.tokens + drafts[:n] + [nxt], eos, max_tokens)
+        last = nxt
     res.gen_s = time.perf_counter() - t1
     return res
