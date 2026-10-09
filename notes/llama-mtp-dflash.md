@@ -1,5 +1,12 @@
 # llama.cpp: MTP and DFlash drafters for Qwen3.8-27B (Track A, part 2)
 
+**TL;DR.** Both drafters work in the Homebrew build (0.4.1, b29c606e2). Best stock setup: ggml-org Q4_K_M +
+our MTP sidecar (Q4_0) with `--spec-type draft-mtp,ngram-simple --spec-draft-n-max 2`: **11.39 tok/s vs 6.64
+(1.71x), all 6 outputs identical to the baseline**. DFlash2 at n=2 reaches 10.66 (10.88 with ngram-simple).
+Longer drafts lose on the M3 Pro because 4-8-token verify batches hit a slow Metal kernel path; with a small
+local patch (`GGML_METAL_MM_MIN_BATCH=5`) DFlash2 n=7 reaches 11.13 mean / 14.5-16.5 tok/s on code, but changes
+3/6 outputs at the float-rounding level. Commands, numbers and the MLX-relevant layer details are below.
+
 Source read: `vendor/llama.cpp` at `b29c606e2` (tag v0.4.1, same commit as the Homebrew build 10964).
 
 ## How this build expects the drafters
@@ -216,6 +223,16 @@ decompressing on the CPU and has no in-session reference; it is ~15% low compare
 | draft-mtp | final-own-q4-n2+ngram-simple | 14.10 | 12.27 | 11.54 | 9.11 | 10.21 | 11.09 | **11.39** | 932.0/1319.0 (71%) | 6/6 |
 | draft-dflash | final-q4-n2+ngram-simple | 13.25 | 11.87 | 10.54 | 9.12 | 9.92 | 10.60 | **10.88** | 941.0/1303.0 (72%) | 6/6 |
 | draft-mtp | final-single-n2+ngram-simple | 13.70 | 11.86 | 11.00 | 9.26 | 9.93 | 11.16 | **11.15** | 940.0/1259.0 (75%) | 6/6 |
+| none | mm5-nospec | 6.71 | 6.78 | 6.79 | 6.73 | 6.82 | 6.81 | **6.77** | - | 6/6 |
+| draft-mtp | mm5-own-q4-n2 | 12.51 | 12.33 | 11.59 | 9.01 | 9.94 | 11.68 | **11.18** | 919/1167 (79%) | 6/6 |
+| draft-mtp | mm5-own-q4-n3 | 10.57 | 10.69 | 8.86 | 6.41 | 7.85 | 9.64 | **9.00** | 1014/1473 (69%) | 4/6 (diff: explain, math) |
+| draft-mtp | mm5-own-q4-n4 | 10.57 | 10.13 | 8.43 | 5.97 | 7.00 | 9.50 | **8.60** | 1080/1712 (63%) | 3/6 (diff: prose, explain, math) |
+| draft-dflash | mm5-q4-n3 | 9.98 | 10.38 | 8.63 | 6.82 | 7.71 | 9.15 | **8.78** | 1030/1418 (73%) | 4/6 (diff: explain, math) |
+| draft-dflash | mm5-q4-n5 | 11.70 | 12.34 | 9.48 | 6.56 | 7.53 | 10.83 | **9.74** | 1134/1846 (61%) | 3/6 (diff: prose, explain, math) |
+| draft-dflash | mm5-q4-n7 | 14.78 | 14.54 | 10.30 | 6.35 | 8.11 | 12.68 | **11.13** | 1171/2322 (50%) | 3/6 (diff: prose, explain, math) |
+| draft-dflash | mm5-q4-n7+ngram-simple | 16.50 | 14.53 | 10.31 | 6.37 | 8.11 | 12.71 | **11.42** | 1176/2328 (51%) | 3/6 (diff: prose, explain, math) |
+
+(`mm5-*` rows: patched build, see below. `accepted/drafted` for the `final-*` rows are medians over 2 runs.)
 
 ### Findings
 
@@ -255,3 +272,102 @@ llama-server -m ~/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snap
 should work identically. `-hf ggml-org/Qwen3.8-27B-GGUF --spec-type draft-mtp` also auto-downloads an `mtp-*`
 sidecar, but we did not check which quant it picks.) Single-file alternative:
 `llama-server -m models/Qwen3.8-27B-Q4_K_M-mtp.gguf --spec-type draft-mtp,ngram-simple --spec-draft-n-max 2 ...`.
+
+## Experiment: patched Metal mat-mat threshold (lets long DFlash blocks pay off)
+
+`scripts/metal-mm-min-batch.patch` (applies to `vendor/llama.cpp` at b29c606e2) adds an env var
+`GGML_METAL_MM_MIN_BATCH=N`: matmuls with a src1 batch >= N use the simdgroup mat-mat kernel instead of
+`mul_mv_ext` (upstream behaviour = 9). Build (cmake from Homebrew, ~2 min):
+
+```bash
+cd vendor/llama.cpp && git apply ../../scripts/metal-mm-min-batch.patch
+cmake -B build-mm -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DLLAMA_CURL=OFF \
+      -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
+cmake --build build-mm -j 10 -t llama-server llama-bench
+```
+
+Forward cost (`build-mm/bin/llama-bench -p B -n 0`), ms per forward:
+
+| GGML_METAL_MM_MIN_BATCH | B=1 | 2 | 3 | 4 | 5 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 9 (upstream) | 153 | 161 | 213 | 304 | 423 | 437 | 584 |
+| 2 | 152 | 378 | 383 | 380 | 379 | 383 | 384 |
+| 4 | 154 | 164 | 213 | 380 | 381 | 383 | 384 |
+| **5** | 154 | 161 | 212 | 304 | 380 | 383 | 385 |
+
+The mat-mat kernel costs a flat ~380 ms for any batch up to 32ish (pp9 = 385 ms, pp16 = 389 ms, pp32 = 402 ms with the
+stock build), so N=5 is optimal: identical for B <= 4, 10-34% cheaper for B = 5..8.
+
+Spec decoding on the patched server (`bench/llama_bench_server.py` runs the shared harness with another binary;
+phase `mm-spec`, MMB=5, one session): no-spec 6.77; MTP n=2 11.18 (unchanged, B=3); **DFlash2 n=7 11.13 mean,
+14.8 / 14.5 tok/s on code_edit / code_gen** (stock: 9.2 / 9.0); DFlash2 n=7 + ngram-simple **11.42 mean, 16.5 on
+code_edit**. Prose gets slower (6.4 vs 9.1 for MTP n=2) because DFlash acceptance on free prose is low.
+So with the patch, DFlash n=7 ties MTP n=2 on average but wins clearly on code/structured output; without it,
+MTP n=2 is the best. The bigger verify batches go through a different kernel, so 3/6 outputs differ from the
+baseline (`prose` from char 820, plus the usual `explain`/`math`): fluent, but not bit-identical.
+This is a local hack (not upstreamed); an upstream fix would be a better small-batch K-quant kernel for M3-class GPUs.
+
+## Dead ends / gotchas
+
+* Full own Q4_K_M conversion (HF -> q8_0 -> llama-quantize --allow-requantize Q4_K_M) skipped: needs ~48 GB
+  peak and there were 47 GB free after the downloads; the splice gives the same trunk byte-for-byte.
+* `scripts/gpu.py` opens the lock file with "w", which truncates the holder's "pid cmd" line whenever another
+  process starts waiting, so the lock file is always empty; use `lsof /tmp/specdec-gpu.lock` + child processes
+  to see who holds it. flock is not FIFO: waits of 1-1.5 h were common with 4-5 agents queued.
+* `pgrep -f '<pattern>'` in a wait loop matches the waiting shell itself (its command line contains the
+  pattern) -> infinite wait. Match on something the loop's own command line doesn't contain.
+* The `mtp-ggml` sweep ran while `hf download` was decompressing the 54 GB checkpoint: all its tok/s are ~15% low.
+* `convert_hf_to_gguf.py` warns `Unknown RoPE type: default` for both the target and the drafter: harmless
+  (DFlash2 uses plain RoPE theta 1e7 on all 128 head dims; written as M-RoPE sections [64,0,0,0]).
+* Requantizing the ggml-org Q8_0 MTP sidecar to Q4_0 (`--allow-requantize`) performs the same as our Q4_0 made
+  from bf16 (11.11 vs 11.04 at n=2).
+
+## Notes for the MLX track (Track B)
+
+**MTP layer of Qwen3.8-27B** (HF names, bf16, all in `model-00018-of-00018.safetensors`; hidden 5120, 24 q heads /
+4 kv heads, head_dim 256, intermediate 17408, vocab 248320; no own embeddings, `mtp_use_dedicated_embeddings: false`):
+
+| HF tensor | shape (out, in) | GGUF |
+|---|---|---|
+| `mtp.pre_fc_norm_embedding.weight` | [5120] | `blk.64.nextn.enorm` |
+| `mtp.pre_fc_norm_hidden.weight` | [5120] | `blk.64.nextn.hnorm` |
+| `mtp.fc.weight` | [5120, 10240] | `blk.64.nextn.eh_proj` |
+| `mtp.layers.0.input_layernorm.weight` | [5120] | `blk.64.attn_norm` |
+| `mtp.layers.0.self_attn.q_proj.weight` | [12288, 5120] (q and output gate interleaved per head: 24 x (256 q + 256 gate)) | `blk.64.attn_q` |
+| `mtp.layers.0.self_attn.k_proj.weight` / `v_proj` | [1024, 5120] | `blk.64.attn_k` / `attn_v` |
+| `mtp.layers.0.self_attn.q_norm.weight` / `k_norm` | [256] | `attn_q_norm` / `attn_k_norm` |
+| `mtp.layers.0.self_attn.o_proj.weight` | [5120, 6144] | `blk.64.attn_output` |
+| `mtp.layers.0.post_attention_layernorm.weight` | [5120] | `blk.64.post_attention_norm` |
+| `mtp.layers.0.mlp.{gate,up}_proj.weight` / `down_proj` | [17408, 5120] / [5120, 17408] | `ffn_gate`/`ffn_up`/`ffn_down` |
+| `mtp.norm.weight` | [5120] | `blk.64.nextn.shared_head_norm` |
+| (shared) `lm_head.weight`, `model.language_model.embed_tokens.weight` | [248320, 5120] | `output`, `token_embd` |
+
+Forward (llama.cpp `llama_model_qwen35::graph_mtp`), for draft position p predicting token p+2:
+`h` = the target's **final-normed** hidden state at p (output of `model.norm`, i.e. what goes into lm_head),
+`e` = embed_tokens(token p+1);
+`x = fc(concat(rmsnorm(e; pre_fc_norm_embedding), rmsnorm(h; pre_fc_norm_hidden)))` (embedding half first);
+then one standard Qwen3.5 *full-attention* decoder layer (gated attention: q/gate split per head, q/k RMSNorm,
+partial M-RoPE on 64 of 256 dims, theta 1e7, `attn * sigmoid(gate)`, o_proj, residual; post_attention_layernorm,
+SwiGLU MLP, residual), then `mtp.norm` -> `lm_head`. The MTP layer keeps its **own KV cache** over all
+positions (llama.cpp runs it over every prompt/accepted token as a catch-up decode, pairing h_p with token p+1).
+Chaining (k > 1): feed the MTP's own post-`mtp.norm` hidden as the next `h` and the token it just drafted.
+Acceptance per drafted token here: 88% (k=1), 79% (k=2), 69% (k=3), ~63% (k=4), greedy, chat prompts.
+
+**DFlash2** (z-lab/Qwen3.8-27B-DFlash2, 1.9B params, 5 layers, hidden 5120, 32 q / 8 kv heads, head_dim 128,
+SWA 2048, non-causal inside the block, block_size 8, mask token 248070):
+1. Context features: the target's hidden states after layers {5, 19, 33, 47, 61} (0-based HF layer ids;
+   llama.cpp extracts the *inputs* of layers 6, 20, 34, 48, 62) are concatenated (5 x 5120 = 25600),
+   projected `fc` [25600 -> 5120], RMSNorm (`hidden_norm`), and that single vector per committed position is
+   written as **K/V into every draft layer's cache** (k_proj/v_proj of each layer, k_norm, RoPE at the target position).
+   Committed tokens never go through the draft layers themselves.
+2. Draft step: input block = [last committed token, MASK x 7] at positions pos0..pos0+7, embedded with the
+   target's `embed_tokens`; 5 layers of non-causal attention over [cached context K/V, block] + SwiGLU MLP.
+   DFlash2 adds a two-tap dynamic depthwise conv along the block (kernel 2, groups of 16 channels): before and
+   after attention (`attention_conv`) and before and after the MLP (`mlp_conv`); per-token taps =
+   `base_kernel` + `kernel_projection(normed input)`.
+3. `norm` -> the target's `lm_head` -> logits per block position; then the **candidate selector**: top-16 tokens
+   per position; score(prev cand i, cand j) = logit_j + successor_codebook[j] . (predecessor_codebook[i] *
+   hidden_projection(h_pos)) (rank 256); a greedy walk from the anchor token picks one path
+   (llama.cpp: argmax per step, CPU side). `--spec-draft-p-min` cuts the path where softmax over the 16 scores
+   is below p.
+One draft forward per block; acceptance at n=7 here: ~50% of drafted tokens (78% on code, 26% on prose).
