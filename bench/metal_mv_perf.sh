@@ -11,6 +11,6 @@ echo "power: $(pmset -g batt | head -1)" | tee -a "$OUT"
 for cfg in "$@"; do
   echo "=== config: $cfg" | tee -a "$OUT"
   if [ "$cfg" = stock ]; then envs=(); else read -r -a envs <<< "$cfg"; fi
-  env "${envs[@]}" $BIN perf -b MTL0 -o MUL_MAT -p "$FILTER" 2>&1 | grep -E "MUL_MAT" | tee -a "$OUT"
+  env "${envs[@]}" $BIN perf -b MTL0 -o MUL_MAT -p "$FILTER" 2>/dev/null | grep -E "MUL_MAT" | tee -a "$OUT"
 done
 echo "wrote $OUT"
