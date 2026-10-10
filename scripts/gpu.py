@@ -13,7 +13,6 @@ import fcntl, os, subprocess, sys, time
 
 LOCK = "/tmp/specdec-gpu.lock"
 QUEUE_DIR = "/tmp/specdec-gpu-queue"
-FOREIGN = r"llama-server|mlx_spec serve"
 
 
 def alive(pid):
@@ -38,8 +37,12 @@ def first_in_queue(ticket):
 def foreign_servers():
     if os.environ.get("SPECDEC_IGNORE_FOREIGN") == "1":
         return []
-    out = subprocess.run(["pgrep", "-f", FOREIGN], capture_output=True, text=True).stdout
-    return [int(p) for p in out.split() if int(p) != os.getpid()]
+    # Match the server executables themselves, not shells or wait loops whose
+    # command line merely mentions them.
+    llama = subprocess.run(["pgrep", "-x", "llama-server"], capture_output=True, text=True).stdout
+    mlx = subprocess.run(["pgrep", "-f", r"^[^ ]*python[^ ]* -m mlx_spec serve"],
+                         capture_output=True, text=True).stdout
+    return [int(p) for p in (llama + mlx).split() if int(p) != os.getpid()]
 
 
 def main():
