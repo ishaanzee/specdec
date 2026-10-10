@@ -449,5 +449,16 @@ def installed_range(model: nn.Module) -> Optional[Tuple[int, int]]:
     return None
 
 
+def power_source() -> str:
+    """'AC Power' / 'Battery Power' from pmset; timings on battery are suspect."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5).stdout
+        return out.split("'")[1] if "'" in out else out.strip()[:40]
+    except Exception:
+        return "unknown"
+
+
 def env_range() -> Optional[Tuple[int, int]]:
     return parse_range(os.environ.get("SPECDEC_QMM"))

@@ -147,7 +147,8 @@ def main():
     rows = []
     tuned = {}
     for tag, (shapes, names) in models.items():
-        print(f"== {tag}: {sum(shapes.values())} quantized matmuls per pass, {len(shapes)} distinct shapes")
+        print(f"== {tag}: {sum(shapes.values())} quantized matmuls per pass, {len(shapes)} distinct shapes"
+              f" [power: {Q.power_source()}]")
         for shape, count in sorted(shapes.items(), key=lambda kv: -kv[0][0] * kv[0][1] * kv[1]):
             N, K, bits, gs = shape
             if a.tune:
@@ -165,7 +166,7 @@ def main():
                        "mlx_GB_s": round(r["gb"] / r["mlx_ms"] * 1e3, 1),
                        "ours_GB_s": round(r["gb"] / r["ours_ms"] * 1e3, 1),
                        "config": list(Q.pick_config(r["M"], N, K, bits, gs)),
-                       "preliminary": a.small, "time": time.strftime("%F %T")}
+                       "preliminary": a.small, "power": Q.power_source(), "time": time.strftime("%F %T")}
                 rows.append(row)
             print(f"{names.get(shape, ''):<28} N={N:<6} K={K:<6} b{bits} g{gs} x{count:<3} M=1 {1e3 * base:7.1f} us | "
                   "mlx/ours x M1: " + " ".join(f"{r['M']}:{r['mlx_ms'] / base:.2f}/{r['ours_ms'] / base:.2f}"
@@ -173,6 +174,7 @@ def main():
     if tuned and not a.small:
         with open(Q._TUNED_PATH, "w") as f:
             json.dump({"device": mx.device_info()["device_name"], "mlx": mx.__version__,
+                       "power": Q.power_source(),
                        "time": time.strftime("%F %T"), "key": "bits,group_size,N,K,M -> [SN,NSG,KS,KP]",
                        "configs": tuned}, f, indent=0)
         print(f"wrote {len(tuned)} tuned configs to {Q._TUNED_PATH}")

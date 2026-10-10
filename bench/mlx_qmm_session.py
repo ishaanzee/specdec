@@ -35,13 +35,23 @@ def main():
     a = ap.parse_args()
 
     r = B.Runner()
-    print(f"[qmm-session] {time.strftime('%F %T')} loadavg {os.getloadavg()[0]:.2f}", flush=True)
+    meta = os.path.join(B.ROOT, "results", "mlx_qmm_session.jsonl")
+
+    def mark(stage):  # power source per stage: timings on battery are suspect
+        row = {"experiment": "qmm_session", "stage": stage, "power": Q.power_source(),
+               "loadavg": round(os.getloadavg()[0], 2), "time": time.strftime("%F %T")}
+        print(f"[qmm-session] {json.dumps(row)}", flush=True)
+        with open(meta, "a") as f:
+            f.write(json.dumps(row) + "\n")
+
+    mark("start")
     if not a.no_verify_cost:
         for rng in (None, a.range):
             Q.install(r.model, rng)
             print(f"== verify-cost, qmm={rng}", flush=True)
             B.verify_cost(r, Ts=range(1, 18), reps=7, modes=("replay",))
         Q.uninstall(r.model)
+        mark("verify-cost done")
     if a.no_bench:
         return
 
@@ -53,6 +63,7 @@ def main():
             configs += [base, f"{base}:qmm={a.range}"]
     prompts = B.load_prompts(only=set(a.only.split(",")) if a.only else None)
     rows = r.bench(configs, prompts, repeat=1, max_tokens=256, profile=True, write=True)
+    mark("bench done")
     if a.no_diagnose:
         return
 
