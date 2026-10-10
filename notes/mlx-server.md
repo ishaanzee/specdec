@@ -37,3 +37,16 @@ the GDN recurrence (as rollback does) -> `Engine._prefill`, `_mid_state`.
   that the speed section reports `same text as CLI: True` for all 6 prompts.
 - Sampling at temperature 0.7 has low acceptance with MTP's greedy drafts
   (10/42 accepted, 8.7 tok/s in a short test); greedy is the fast path.
+
+## Rerun with the fix (2026-10-10, logs/server_smoke.log)
+- Speed section: **same text as CLI: True on all 6 prompts**; mean 22.13 tok/s
+  (code_edit 24.8, code_gen 24.4, summarize 22.0, prose 16.3, explain 20.8,
+  math 24.5) vs the CLI rows' 20.99.
+- Cache section ran with the GPU visibly contended (gen 2.9-8 tok/s on some
+  turns, prefill 38 t/s on one), so its timings are unreliable; reuse still
+  cut TTFT to 2.0 / 0.41 s (turns 2/3) vs 32.8 / 24.3 s. Turns 1-2 identical
+  with/without reuse; turn 3 diverged at char 129. Unchecked whether that is a
+  near-tie (reuse prefix computed by verify passes vs one prefill pass) - next step:
+  diagnose the logit margin there like overhead.py does.
+- Run ended with the server stopped (SIGTERM) before the sampling section;
+  results/mlx_server_smoke.json not rewritten by this run.
