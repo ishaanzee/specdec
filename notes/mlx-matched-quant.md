@@ -1,10 +1,16 @@
 # MLX with the same weights as llama.cpp's Q4_K_M
 
-**Summary.** Plan A works: ggml-org's Q4_K_M GGUF transcodes to an MLX
+**Summary.** Plan A works. ggml-org's Q4_K_M GGUF transcodes to an MLX
 checkpoint with the same 4-/8-bit codes (`models/qwen38-27b-q4km-mlx`, 21.1 GB).
-The only differences are bf16 rounding of the scales/biases and 8-bit
-re-quantization of the 17 Q6_K tensors. Perplexity, KL vs llama.cpp and speed:
-see "Measurements" (they run under the GPU lock).
+On 16 x 2048 wikitext-2 tokens it scores **PPL 6.131** against llama.cpp's
+**6.122** for the GGUF, with KL 0.0024 to llama.cpp's own distribution and the
+same top-1 token 98.0 % of the time. mlx-community's 4-bit scores **6.275**
+(KL 0.068, top-1 agreement 89.9 %), so it really was the dumber model. Greedy
+outputs match llama.cpp's text exactly on 4 of 6 prompts, and the other 2
+diverge at exact or one-ulp ties. The price is speed: the file is 31 % bigger,
+so greedy drops from 8.42 to 5.71 tok/s and MTP k=3 from 18.45 to 15.76 tok/s
+(same session, on AC, but with other agents' CPU load). That is still 1.4x
+llama.cpp's best (11.4 tok/s) on the same weights.
 
 ## Why
 
@@ -125,17 +131,97 @@ the tensors that are Q8_0 in the GGUF (where the GGUF side adds only ~0.7 %),
 ~ 7 %). mlx-community's 4-bit g64 is ~30 % noisier than Q4_K on the MLP and
 ~13x noisier than Q8_0 on attention/SSM.
 
-## Measurements
+## Measurements (2026-10-10, on AC power, GPU lock)
 
-Queued under `scripts/gpu.py` (they wait while the user's own llama-server
-runs): `bench/llama_ppl.sh` (llama.cpp PPL on 16 x 2048 wikitext-2 tokens + base
-log-probs), `bench/mlx_matched_quant_session.sh ppl` (MLX PPL and KL vs
-llama.cpp, same tokens, both MLX models, bf16 and fp32 lm_head) and `... speed`
-(greedy and `mtp:k=3:vocab=65536`, both models, same session, plus output
-comparison against llama.cpp's baseline texts with `diagnose()`). Rows go to
-`results/quality_ppl.jsonl`, `results/mlx_matched_quant.jsonl`,
-`results/mlx_matched_quant_vs_llama.jsonl`, each with the power source
-(timings on battery are suspect).
+### Perplexity and KL vs llama.cpp
 
-PENDING
+wikitext-2-raw test, `llama-perplexity -c 2048 --chunks 16` convention: 16
+non-overlapping chunks of 2048 tokens, no BOS, second half of each chunk scored
+(16,368 tokens). The MLX side (`bench/mlx_ppl.py`) reads the token ids and
+llama.cpp's log-probs from the `--kl-divergence-base` file, so all three score
+identical tokens. HF tokenization of the file was checked to match llama.cpp's
+token for token. KL is KL(llama.cpp Q4_K_M || model), computed as in
+`llama-perplexity --kl-divergence`. There is no bf16 reference (that would need
+the 54 GB download), so KL measures fidelity to the GGUF, not to the original model.
 
+| model | size | PPL | KL vs llama.cpp mean / median / p99 | same top-1 | RMS Δp |
+|---|---|---|---|---|---|
+| llama.cpp, ggml-org Q4_K_M (f32 activations) | 19.0 GB | **6.1223 ± 0.116** | (reference) | | |
+| MLX, Q4_K_M transcode (ours) | 21.1 GB | **6.1308 ± 0.116** | 0.0024 / 0.0004 / 0.0074 | 98.0 % | 1.6 % |
+| MLX, ours, lm_head in fp32 | | 6.1294 | 0.0022 / 0.0002 / 0.0071 | 99.0 % | 1.6 % |
+| MLX, mlx-community 4-bit g64 | 16.1 GB | **6.2746 ± 0.119** | 0.068 / 0.026 / 0.52 | 89.9 % | 7.0 % |
+| MLX, mlx-community, fp32 lm_head | | 6.2730 | 0.068 / 0.026 / 0.53 | 90.1 % | 7.0 % |
+
+(The uint16-quantized base log-probs give 6.1207 for llama.cpp itself; the
+difference from 6.1223 is that quantization.) Ours is within 0.14 % of
+llama.cpp's perplexity. The residual KL (0.0024) comes from bf16 activations,
+not the weights: the per-tensor transcode error is far smaller than bf16
+activation rounding, and half of the top-1 disagreements go away just by
+computing lm_head in fp32. mlx-community's 4-bit is +2.5 % perplexity and 28x
+the KL. That is a real quality loss.
+
+### Greedy outputs vs llama.cpp (`results/mlx_matched_quant_vs_llama.jsonl`)
+
+Compared with llama.cpp's baseline texts (`results/baseline_outputs/Qwen3.8-27B-Q4_K_M`,
+256 tokens, same chat template, which is byte-identical in both). `diagnose()`
+gives our model's single-step logit margin at the first differing token:
+
+| prompt | ours (Q4_K_M transcode) | mlx-community 4-bit |
+|---|---|---|
+| code_edit | **identical** | diverges at token 200 (margin 0.375) |
+| code_gen | **identical** | token 33 (0.375) |
+| summarize | **identical** | token 63 (0.375) |
+| prose | token 46, exact tie (margin 0.0) | token 23 (0.25) |
+| explain | **identical** | token 0 (4.75: different first word) |
+| math | token 13, one bf16 ulp (0.125) | token 8 (0.125) |
+
+### Speed (`bench/mlx_matched_quant.py`, `results/mlx_matched_quant.jsonl`)
+
+`Runner.bench`, 6 prompts, 256 tokens, median of 2 runs, both models in one
+session on AC power. Other agents' CPU jobs were running (load average 3.5-7),
+so absolute numbers are below the clean Track B session: mlx-community's
+MTP k=3 gives 18.45 here vs 23.02 before, and its verify round is 170 ms vs
+125 ms. The ratio between the two models is the useful number.
+
+| model | greedy tok/s | MTP k=3 vocab 65536 tok/s | MTP accept (pos 1/2/3) | verify ms/round |
+|---|---|---|---|---|
+| mlx-community 4-bit | 8.42 | 18.45 (2.19x) | 0.71 (0.87/0.79/0.76) | 170 |
+| **ours, Q4_K_M transcode** | **5.71** | **15.76 (2.76x)** | 0.70 (0.86/0.77/0.78) | 181 |
+| llama.cpp Q4_K_M (REPORT.md) | 6.64 | 11.39 (MTP 2 + ngram) | | |
+
+Per prompt, ours MTP: 19.4 / 18.4 / 16.3 / 11.1 / 13.2 / 16.2 (code_edit,
+code_gen, summarize, prose, explain, math). MTP acceptance with the bf16-extracted
+MTP head is the same as with mlx-community (0.70 vs 0.71). Greedy is 0.68x
+mlx-community because 21.1 GB vs 16.1 GB is read per token (0.76x expected from bytes alone). Speculation hides part of it
+(0.85x), because verify cost scales less than linearly with weight bytes at T=4.
+The MTP outputs of ours diverge from our own greedy on 3/6 prompts at the
+usual bf16 batched-vs-single near-ties (Track B), as they do for mlx-community.
+A clean rerun (quiet machine, AC) should be done before quoting absolute tok/s.
+
+## Recommendation
+
+* Use `models/qwen38-27b-q4km-mlx` as the MLX target when quality matters. It is
+  the user's llama.cpp model, at llama.cpp's perplexity to within 0.14 %, and with
+  MTP k=3 it still runs ~1.4x faster than llama.cpp's best config on the same
+  weights (15.8 vs 11.4 tok/s, this session's conditions).
+* mlx-community's 4-bit is measurably worse (+2.5 % PPL, KL 0.068). Its speed
+  advantage comes from dropping attention/SSM from 8 to 4 bits.
+* For the kernel work, the target now has three matmul shapes: 4-bit g32 (MLP,
+  embedding), 8-bit g32 (attention, GDN projections, o_proj, lm_head), bf16
+  scales/biases throughout. The 8-bit g32 matvec path matters now. It carries
+  ~7.5 GB of the ~20 GB read per token.
+* Options not taken: `--q6k bf16` (Q6_K tensors exactly to bf16 rounding,
+  +1.6 GB, slower; the PPL/KL above leave nothing for it to fix); fp32
+  activations (would remove the residual KL but cost speed); Plan B (bf16
+  download) is unnecessary.
+
+## Reproduce
+
+```
+.venv/bin/python scripts/gguf_to_mlx.py --check                  # CPU, 4.5 min, 21.1 GB
+.venv/bin/python scripts/check_transcode_vs_mlxcommunity.py
+scripts/gpu.py sh bench/llama_ppl.sh                              # writes models/wikitext/q4km-base.kld (8.1 GB)
+scripts/gpu.py sh bench/mlx_matched_quant_session.sh ppl
+scripts/gpu.py sh bench/mlx_matched_quant_session.sh speed
+scripts/gpu.py .venv/bin/python -m mlx_spec bench --target models/qwen38-27b-q4km-mlx --configs mtp:k=3:vocab=65536
+```
