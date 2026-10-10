@@ -281,8 +281,12 @@ class Engine:
         if any(s.pos == pos for s in self.snaps):
             return
         gdn = [(c[0], c[1]) for c in self.cache if isinstance(c, LinearCache)]
+        logits = logits.astype(mx.float32)  # a copy: a row view would pin the pass's [T, V] logits
         mx.eval(logits, gdn)
         self.snaps.append(Snapshot(pos, gdn, logits))
+        self._trim_snaps()
+
+    def _trim_snaps(self):
         while len(self.snaps) > self.max_snapshots:  # drop the shortest
             self.snaps.remove(min(self.snaps, key=lambda s: s.pos))
 
@@ -313,6 +317,54 @@ class Engine:
         if self.mtp is not None:
             self.H = self._hidden()[:P]
         self.snaps = [s for s in self.snaps if s.pos <= P]
+
+    def _prefill(self, prompt, P, L, B=None):
+        """Prefill ``prompt[P:L]`` in chunks of ``prefill_step`` (the same passes
+        as ``SpecModel.prefill``, so numerics match a CLI run) and snapshot at
+        ``B`` and ``L``. The state at ``B`` (mid-chunk) is recovered like a
+        rollback: replay the recurrence kernel over the chunk's first tokens
+        (bitwise the state the pass had there), conv window sliced from the
+        recorded input; no extra chunk boundary. Returns the last logits."""
+        for s in range(P, L, self.prefill_step):
+            e = min(s + self.prefill_step, L)
+            out = self.spec.forward(mx.array(prompt[s:e], mx.uint32), self.cache)
+            mid = None
+            if B is not None and s < B < e:
+                mid = self._mid_state(B - s)
+            self.spec.commit(self.cache, e - s)
+            mx.eval(out.logits, out.normed, [c.state for c in self.cache])
+            if mid is not None:
+                n = B - s
+                pos = len(self.tokens) + n
+                row = out.logits[n - 1].astype(mx.float32)
+                mx.eval(row, mid)
+                self.snaps.append(Snapshot(pos, mid, row))
+            self._add_hidden(out, e - s)
+            self.tokens += prompt[s:e]
+            if e == B:
+                self._snapshot(out.logits[-1])
+        self._snapshot(out.logits[-1])
+        self._trim_snaps()
+        return out.logits[-1]
+
+    def _mid_state(self, n):
+        """(conv, state) per GDN layer after the first ``n`` tokens of the
+        pending (uncommitted) pass, as ``LinearCache.commit`` would compute it."""
+        from .gdn import recurrence
+
+        res = []
+        for c in self.cache:
+            if not isinstance(c, LinearCache):
+                continue
+            p = c.pending
+            n_conv = p["conv_input"].shape[1] - p["T"]
+            conv = mx.contiguous(p["conv_input"][:, n : n + n_conv, :])
+            if "states" in p:  # capture mode
+                st = p["states"][:, n - 1]
+            else:
+                _, st = recurrence(**{k: p[k][:, :n] for k in ("q", "k", "v", "g", "beta")}, state=p["state0"])
+            res.append((conv, st))
+        return res
 
     def _start_drafter(self, prompt, P, last_logits):
         L = len(prompt)
@@ -365,20 +417,13 @@ class Engine:
         snap = self.reuse_point(prompt) if params.cache_prompt else None
         self._restore(snap)
         P = len(self.tokens)
-        # Prefill the rest, pausing before the generation prompt (the last
-        # <|im_start|>) to snapshot there: the next turn re-renders this
-        # assistant turn and may tokenize its start differently.
+        # Prefill the rest, also snapshotting before the generation prompt (the
+        # last <|im_start|>): the next turn re-renders this assistant turn and
+        # may tokenize its start differently.
         B = max((i for i in range(P, L) if prompt[i] == self.im_start), default=None)
-        cuts = [P] + ([B] if B is not None and P < B else []) + [L]
         last_logits = snap.logits if snap is not None and snap.pos == L else None
-        for a, b in zip(cuts, cuts[1:]):
-            if a == b:
-                continue
-            out = self.spec.prefill(mx.array(prompt[a:b], mx.uint32), self.cache, step=self.prefill_step)
-            self._add_hidden(out, b - a)
-            self.tokens += prompt[a:b]
-            last_logits = out.logits[-1]
-            self._snapshot(last_logits)
+        if P < L:
+            last_logits = self._prefill(prompt, P, L, B if B is not None and P < B else None)
         res = GenResult([], L, P, 0.0, 0.0)
         if max_new <= 0:
             res.prompt_s = time.perf_counter() - t0

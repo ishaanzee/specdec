@@ -524,3 +524,26 @@ def test_openai_client(server):
         model="tiny", messages=CHAT["messages"], max_tokens=10, temperature=0, stream=True,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}}) if c.choices]
     assert "".join(parts) == r.choices[0].message.content
+
+
+@pytest.mark.parametrize("mode", ["replay", "capture", "reforward"])
+def test_mid_chunk_snapshot(model, tok, head, mode):
+    """The prompt is prefilled in one pass (as the CLI does); the snapshot before
+    the generation prompt is recovered mid-pass by replay. A next prompt that
+    shares only that prefix reuses it and matches a fresh prefill."""
+    reuse = make_engine(model, tok, head, max_context=4096, rollback=mode)
+    fresh = make_engine(model, tok, head, max_context=4096, rollback=mode)
+    msgs = [{"role": "user", "content": "Tell me about the sea."}]
+    p1 = chat_ids(tok, msgs)  # thinking on: ends with <think>\n
+    B = max(i for i, t in enumerate(p1) if t == reuse.im_start)
+    reuse.generate(p1, GenParams(12, GREEDY))
+    assert any(s.pos == B for s in reuse.snaps)
+    # history with the reasoning dropped -> diverges right after p1[:B + 3]
+    p2 = chat_ids(tok, msgs + [{"role": "assistant", "content": "It is big."},
+                               {"role": "user", "content": "And deep?"}])
+    assert p2[:B] == p1[:B] and p2[: len(p1)] != p1
+    a = reuse.generate(p2, GenParams(16, GREEDY))
+    b = fresh.generate(p2, GenParams(16, GREEDY, cache_prompt=False))
+    assert a.n_cached == B and a.tokens == b.tokens
+    for x, y in zip(_mtp_kv(reuse), _mtp_kv(fresh)):
+        assert np.allclose(x, y, atol=1e-4)
