@@ -6,6 +6,7 @@ Every function here loads or runs a model, so call them through
 
 import hashlib
 import json
+import os
 import statistics
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from .decode import GenResult, greedy_generate, speculative_generate
 from .drafters import (DraftModelDrafter, HybridDrafter, NgramDrafter, NoDrafter, restore,
                        snapshot)
 from .model import SpecModel
+from .qmm_kernel import install, installed_range
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = "mlx-community/Qwen3.8-27B-4bit"
@@ -140,6 +142,8 @@ class Runner:
         raise ValueError(f"unknown method {m}")
 
     def run(self, cfg, prompt_ids, max_tokens, profile=False) -> GenResult:
+        if "qmm" in cfg or installed_range(self.model):  # opt-in kernel, per config (qmm_kernel.py)
+            install(self.model, cfg.get("qmm", os.environ.get("SPECDEC_QMM")))
         if cfg["method"] == "greedy":
             return greedy_generate(self.model, prompt_ids, max_tokens, self.eos)
         return speculative_generate(
@@ -298,6 +302,7 @@ def verify_cost(runner: Runner, Ts=range(1, 18), reps=7, modes=("replay", "captu
                 "rollback_ms": round(1e3 * statistics.median(r_times), 2),
                 "graph_build_ms": round(1e3 * statistics.median(b_times), 2),
                 "rollback_keep": n_keep,
+                "qmm": installed_range(runner.model),
                 "stock_decode_ms": round(stock_ms, 2),
                 "ctx": len(ids), "reps": reps, "model": runner.target_name,
                 "time": time.strftime("%F %T"),

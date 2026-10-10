@@ -12,6 +12,7 @@ file adds the three things the speculative loop needs from the target:
   ``n_keep`` and roll back the rest, in every layer.
 """
 
+import os
 from dataclasses import dataclass
 from typing import List
 
@@ -56,9 +57,16 @@ class SpecModel:
     the same weights can serve the plain baseline.
     """
 
-    def __init__(self, model: nn.Module, rollback: str = "replay"):
+    def __init__(self, model: nn.Module, rollback: str = "replay", qmm=None):
         self.model = model
         self.rollback = rollback
+        # Opt-in: small-batch quantized matmul for verify passes of 2..16 rows
+        # (qmm_kernel.py). qmm="2-16" or env SPECDEC_QMM=2-16; off by default.
+        qmm = qmm if qmm is not None else os.environ.get("SPECDEC_QMM")
+        if qmm:
+            from .qmm_kernel import install
+
+            install(model, qmm)
         tm = text_model(model)
         self.lm = tm
         self.inner = tm.model  # Qwen3_5TextModel: embed_tokens, layers, norm
