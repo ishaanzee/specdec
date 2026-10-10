@@ -5,6 +5,7 @@
   scripts/gpu.py .venv/bin/python -m mlx_spec verify-cost
   scripts/gpu.py .venv/bin/python -m mlx_spec mlxlm        # compare with mlx_lm.generate
   .venv/bin/python -m mlx_spec summary                       # results table (no GPU)
+  scripts/gpu.py .venv/bin/python -m mlx_spec serve          # OpenAI-compatible server, port 8081
 
 Config strings: ``method[:key=value]...``
   greedy                          plain greedy decode (stock mlx-lm caches)
@@ -58,7 +59,15 @@ def main(argv=None):
     sub.add_parser("mlxlm", help="compare the greedy baseline with mlx_lm.generate")
     sub.add_parser("summary", help="markdown table of results/mlx_*.jsonl (no model)")
 
+    from .server import add_args as add_serve_args
+
+    add_serve_args(sub.add_parser("serve", help="OpenAI-compatible HTTP server (see server.py)"))
+
     a = ap.parse_args(argv)
+    if a.cmd == "serve":
+        from .server import serve
+
+        return serve(a)
     from . import bench as B
 
     if a.cmd == "summary":
