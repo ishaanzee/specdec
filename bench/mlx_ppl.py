@@ -41,6 +41,13 @@ def read_base(path):
     return int(n_ctx), int(n_vocab), tokens, mm
 
 
+def power():
+    """Power source from pmset (timings on battery are suspect)."""
+    import subprocess
+    out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
+    return "battery" if "Battery Power" in out else "ac" if "AC Power" in out else out.strip()[:40]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True)
@@ -120,7 +127,7 @@ def main():
         "kld_mean": acc["kld"] / n, "kld_median": float(np.median(kl_all)),
         "kld_p99": float(np.percentile(kl_all, 99)), "kld_max": float(kl_all.max()),
         "same_top": acc["same_top"] / n, "rms_dp": float(np.sqrt(acc["dp2"] / n)),
-        "max_dp": acc["maxdp"], "seconds": time.time() - t0,
+        "max_dp": acc["maxdp"], "seconds": time.time() - t0, "power": power(),
     }
     print(json.dumps(row), flush=True)
     with open(a.out, "a") as f:

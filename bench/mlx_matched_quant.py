@@ -29,6 +29,13 @@ from mlx_spec import bench as B  # noqa: E402
 LLAMA = ROOT / "results" / "baseline_outputs" / "Qwen3.8-27B-Q4_K_M"
 
 
+def power():
+    """Power source from pmset (timings on battery are suspect)."""
+    import subprocess
+    out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
+    return "battery" if "Battery Power" in out else "ac" if "AC Power" in out else out.strip()[:40]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", required=True)
@@ -44,7 +51,7 @@ def main():
                         profile=True, write=False)
     with open(ROOT / "results" / "mlx_matched_quant.jsonl", "a") as f:
         for r in rows:
-            f.write(json.dumps({"target": a.target, **r}) + "\n")
+            f.write(json.dumps({"target": a.target, "power": power(), **r}) + "\n")
 
     if a.no_diagnose:
         return
