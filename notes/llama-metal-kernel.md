@@ -1,6 +1,6 @@
 # llama.cpp Metal: a multi-row mat-vec kernel for 2-16 token verify batches (M3 Pro)
 
-Status: **kernel implemented and correct (test-backend-ops); all GPU timings still pending** — the GPU lock
+Status: **kernels implemented and correct (test-backend-ops); kernel-level timings in, end-to-end pending** — the GPU lock
 (`scripts/gpu.py`) has been waiting on the user's own llama-server (pid 70535, idle, up since ~18:00) all night.
 Queued: `bench/metal_mv_perf.sh` (kernel A/B), then `bench/llama_multirow_sweep.sh kbench|ppl|e2e-*`.
 Tables marked TODO get filled from those runs.
@@ -88,7 +88,56 @@ kernels: adding +1 to every output made 185 of them fail with the env var on and
 
 Perplexity (wikitext-2 test, -c 128, ubatch 16 and 5, 24 chunks), stock vs multirow: TODO.
 
-## Kernel timings (test-backend-ops perf, model shapes) — TODO
+## Kernel timings (test-backend-ops perf, model shapes) — interim, 2026-10-10
+
+Logs: `logs/metal_mv_perf_run1.out` (battery; stock + scalar NR0=1/2), `logs/metal_mv_perf_run2.log` (AC; stock,
+MMA v1 = shared src1 tile + 4 simdgroups, scalar NR0=4), `logs/metal_mv_perf_run3.log` (AC; stock, MMA v2 =
+per-simdgroup src1 tile, NSG 1/2/4). Table: `python3 bench/metal_mv_perf_table.py <log>`. Cells: us/run.
+n=1 rows are the same code in every column, so their spread (368-614 us) is the session noise level.
+
+ffn_up/gate Q4_K 17408x5120 (50 MB; 1-row stock ~370 us = 135 GB/s):
+
+| n | stock | scalar NR0=2 | scalar NR0=4 | MMA v1 (NSG 4) | MMA v2 (NSG 1) |
+|---|---:|---:|---:|---:|---:|
+| 2 | 400-540 | 410 | 486 | 668 | 744 |
+| 3 | 600-770 | 565 | 653 | 662 | 679 |
+| 4 | 1100 | 785 | 928 | 680 | 634 |
+| 5 | 1475-1690 | 988 | 1185 | 685 | 684 |
+| 6 | 1500-1600 | 1389 | 1415 | 666 | 652 |
+| 8 | 2056-2137 | 2106 | 2425 | 717 | 689 |
+| 9 | 1241-1267 | 3011 | 3048 | 896 | 1258 |
+| 16 | 1247-1386 | 6386 | 10207 | 911 | 1365 |
+| 32 / 64 / 128 (mm) | 1257 / 2350 / 4538 | | | | |
+
+Findings so far:
+* **mm root cause confirmed:** stock mm costs the same for n = 9..32 and doubles per extra 32-column tile
+  (1257 -> 2350 -> 4538 us for n = 32/64/128): cost is per 64x32 output tile, i.e. compute/dequant-bound on a
+  tile that is 2-3.5x padded at n = 9..16, at ~40 GB/s.
+* **Scalar multi-row kernel (the design asked for) only wins at n = 2..4.** Each src1 float4 it loads feeds only
+  NR0 dot products, so at n >= 5 it is bound by src1 re-reads from L1 (~0.5-0.7 TB/s of src1 traffic), not by
+  the weight stream; NR0=1 is worst, NR0=4 runs out of registers. Q8_0/Q6_K at n = 2..3 with NR0=4 are at or
+  slightly better than stock.
+* **MMA variant (simdgroup 8x8 matrices, 16 rows x 8/16 src1 rows per simdgroup) is flat ~650-720 us for
+  n = 3..8 on Q4_K (2.3-3x faster than stock at n = 5..8), ~900 us for n = 9..16 with v1 (30% faster than mm)**;
+  Q6_K: 330-370 us vs 530-1070 stock at n = 4..8; LM head 248320x5120 Q6_K: ~10-11 ms flat for n = 3..8 vs
+  22-44 ms stock. Q8_0: ~600-670 us at n = 4..8 vs 570-1190 stock, but **worse than mm at n = 9..16** (780-900 vs
+  705-770). It reaches only ~75 GB/s: latency-bound (each simdgroup loads ~1.1 KB of weights per K step and waits).
+* v2 (per-simdgroup src1 staging, no threadgroup barriers) = same as v1 at n <= 8, worse at 9..16 (redundant
+  src1 staging). v1 is the better base.
+
+Current dispatch in the patch (all behind `GGML_METAL_MV_MULTIROW=1`): ne11 >= `GGML_METAL_MV_MULTIROW_MMA`
+(default 5) -> MMA kernel (v2 code, `GGML_METAL_MV_MMA_NSG`, default 2), else scalar kernel (NR0 default 2).
+All variants pass test-backend-ops MUL_MAT (234/234; sabotage check confirms coverage).
+
+## Next steps (not done yet)
+
+1. Go back to v1 structure (shared src1 tile, 4 simdgroups) and add software prefetch: load the next K step's
+   raw quants into registers before the barrier + MMAs (split `mv_mma_deq` into load/convert). Target: >= 110 GB/s.
+2. Pick per-type ranges from the tables: n = 2: stock; n = 3..4: scalar NR0=4 for Q8_0/Q6_K, MMA for Q4_K;
+   n = 5..8: MMA; n = 9..16: MMA for Q4_K/Q6_K, stock mm for Q8_0 (until prefetch fixes it).
+3. Then run `scripts/gpu.py bench/llama_multirow_sweep.sh kbench`, `ppl`, `e2e-mtp`, `e2e-dflash`, `e2e-draft`,
+   `e2e-stock` (all record the power source; only compare within a session/power state; e2e is --paired).
+
 
 ## Forward cost, llama-bench -p B -n 0 (-fa 1 -ngl 999), B = 1..17 — TODO
 
