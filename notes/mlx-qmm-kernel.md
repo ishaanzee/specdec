@@ -314,3 +314,20 @@ power source not recorded (the Mac was later found on battery, so treat these
 as suspect). The real-shape microbenchmark, tuning, verify-cost curve and
 end-to-end runs are queued as one GPU-lock job (`bench/mlx_qmm_pipeline.sh`)
 and record the power source per stage.
+
+## State at hand-off (2026-10-10)
+
+Done: root cause (s.1), kernel + hook (s.2), unit tests 23/23 pass (re-run
+after the final edits), tuning + real-shape microbench (s.4, AC power),
+verify-cost curve (s.5), end-to-end k = 3..8 for MTP vocab 65536 and the 0.8B
+draft with/without the kernel, all complete (s.6, AC power, user active on the
+machine, ~3% noise), every bf16 divergence diagnosed as a one-ulp near-tie,
+fp32 12/12 identical (s.7). Best config: `mtp:k=7:vocab=65536:qmm=5-16`,
+26.6 tok/s (3.12x greedy, +27% over MTP k=3 with MLX's kernels in the same
+session). No gpu.py job of this track is queued or running.
+
+Left (optional): a clean re-run of the verify-cost curve with the final
+5-16 / N >= 256 routing on an idle machine; repeat=2 of the best configs on
+an idle machine to pin absolute tok/s; the Q4_K_M transcode end to end with
+the kernel (microbench says its verify pass drops from 229 to 163 ms at T=8);
+an adaptive k (k=3 on low-acceptance text such as prose).
