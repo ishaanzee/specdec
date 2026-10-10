@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-common.cpp b/ggml/src/ggml-metal/ggml-metal-common.cpp
-index 05755eb3b..c50aeb33c 100644
+index 05755eb3b..99f69fd29 100644
 --- a/ggml/src/ggml-metal/ggml-metal-common.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-common.cpp
-@@ -5,8 +5,66 @@
+@@ -5,8 +5,67 @@
  #include "ggml-impl.h"
  #include "ggml-backend-impl.h"
  
@@ -23,6 +23,7 @@ index 05755eb3b..c50aeb33c 100644
 +        c.max_r    = env_int("GGML_METAL_MV_MULTIROW_R",   16);
 +        c.nr0      = env_int("GGML_METAL_MV_MULTIROW_NR0",  0);
 +        c.nsg      = env_int("GGML_METAL_MV_MULTIROW_NSG",  2);
++        c.mma_min  = env_int("GGML_METAL_MV_MULTIROW_MMA",  5);
 +
 +        c.max_r = c.max_r < 2 ? 2 : (c.max_r > 16 ? 16 : c.max_r);
 +        if (c.nr0 != 0 && c.nr0 != 1 && c.nr0 != 2 && c.nr0 != 4) {
@@ -70,10 +71,10 @@ index 05755eb3b..c50aeb33c 100644
      const int64_t ne00 = op->src[0]->ne[0];
      const int64_t ne11 = op->src[1]->ne[1];
 diff --git a/ggml/src/ggml-metal/ggml-metal-common.h b/ggml/src/ggml-metal/ggml-metal-common.h
-index 66abdb52e..b70dbfd06 100644
+index 66abdb52e..510324a4a 100644
 --- a/ggml/src/ggml-metal/ggml-metal-common.h
 +++ b/ggml/src/ggml-metal/ggml-metal-common.h
-@@ -49,6 +49,21 @@ void ggml_graph_optimize(struct ggml_cgraph * gf);
+@@ -49,6 +49,24 @@ void ggml_graph_optimize(struct ggml_cgraph * gf);
  
  // mat-mat vs mat-vec dispatch; used by both supports_op and ggml_metal_op_mul_mat*
  bool ggml_metal_op_mul_mat_use_mm   (const struct ggml_tensor * op, bool has_simdgroup_mm);
@@ -83,12 +84,15 @@ index 66abdb52e..b70dbfd06 100644
 +//   GGML_METAL_MV_MULTIROW_R=N    max src1 rows per threadgroup (2..16)          (default 16)
 +//   GGML_METAL_MV_MULTIROW_NR0=N  src0 rows per simdgroup (1, 2 or 4)            (default: per type)
 +//   GGML_METAL_MV_MULTIROW_NSG=N  simdgroups per threadgroup                     (default 2)
++//   GGML_METAL_MV_MULTIROW_MMA=N  use the simdgroup-MMA variant (kernel_mul_mv_mma_*) for ne11 >= N
++//                                 (default 5; 99 = never, 2 = always)
 +struct ggml_metal_mv_mr_cfg {
 +    bool enabled;
 +    int  max_ne11;
 +    int  max_r;
 +    int  nr0;   // 0 = per-type default
 +    int  nsg;
++    int  mma_min;
 +};
 +const struct ggml_metal_mv_mr_cfg * ggml_metal_mv_mr_get_cfg(void);
 +bool ggml_metal_op_mul_mat_use_mv_mr(const struct ggml_tensor * op);
@@ -96,10 +100,10 @@ index 66abdb52e..b70dbfd06 100644
  
  #ifdef __cplusplus
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index bf3d07e78..6882b8ffd 100644
+index bf3d07e78..e886f6053 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -759,6 +759,42 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_ext(ggml_
+@@ -759,6 +759,78 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_ext(ggml_
      return res;
  }
  
@@ -139,32 +143,110 @@ index bf3d07e78..6882b8ffd 100644
 +    return res;
 +}
 +
++ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_mma(ggml_metal_library_t lib, const ggml_tensor * op, int nc) {
++    char base[256];
++    char name[256];
++
++    GGML_ASSERT(op->src[1]->ne[2] <= INT16_MAX && op->src[1]->ne[3] <= INT16_MAX);
++    const int16_t ne12 = (int16_t) op->src[1]->ne[2];
++    const int16_t r2   = (int16_t) (op->src[1]->ne[2] / op->src[0]->ne[2]);
++    const int16_t r3   = (int16_t) (op->src[1]->ne[3] / op->src[0]->ne[3]);
++
++    snprintf(base, 256, "kernel_mul_mv_mma_%s_f32_nc_%d", ggml_type_name(op->src[0]->type), nc);
++    snprintf(name, 256, "%s_ne12=%d_r2=%d_r3=%d", base, ne12, r2, r3);
++
++    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
++    if (!res.pipeline) {
++        ggml_metal_cv_t cv = ggml_metal_cv_init();
++
++        ggml_metal_cv_set_int16(cv, 4,    FC_MUL_MV + 0);
++        ggml_metal_cv_set_int16(cv, ne12, FC_MUL_MV + 2);
++        ggml_metal_cv_set_int16(cv, r2,   FC_MUL_MV + 3);
++        ggml_metal_cv_set_int16(cv, r3,   FC_MUL_MV + 4);
++
++        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
++
++        ggml_metal_cv_free(cv);
++    }
++
++    // 64 src0 rows x 8*nc src1 rows per threadgroup, 4 simdgroups;
++    // threadgroup memory: src1 tile (8*nc x 128 half) + 4 weight tiles (16 x 128 half)
++    res.nr0  = 64;
++    res.nr1  = 8*nc;
++    res.nsg  = 4;
++    res.smem = (size_t) (8*nc + 64)*128*sizeof(uint16_t);
++
++    return res;
++}
++
  ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_metal_library_t lib, const ggml_tensor * op) {
      char base[256];
      char name[256];
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index ced33aadf..fe4afe1f2 100644
+index ced33aadf..e2b31cb16 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
-@@ -135,6 +135,7 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rwkv
+@@ -135,6 +135,8 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rwkv
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_gated_delta_net   (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_solve_tri         (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_ext        (ggml_metal_library_t lib, const struct ggml_tensor * op, int nsg, int nxpsg, int r1ptg);
 +struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_mr         (ggml_metal_library_t lib, const struct ggml_tensor * op, int nsg, int r, int nr0);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_mma        (ggml_metal_library_t lib, const struct ggml_tensor * op, int nc);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm            (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv            (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0    (ggml_metal_library_t lib, int ne02, int ne20);
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index b4e87cb2c..2d10245fb 100644
+index b4e87cb2c..8e6f03742 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -2414,6 +2414,58 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+@@ -2414,6 +2414,99 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
      const int16_t r2 = ne12/ne02;
      const int16_t r3 = ne13/ne03;
  
 +    if (ggml_metal_op_mul_mat_use_mv_mr(op)) {
 +        // multi-row mat-vec: one pass over src0 serves up to 16 src1 rows
 +        const ggml_metal_mv_mr_cfg * cfg = ggml_metal_mv_mr_get_cfg();
++
++        if (ne11 >= cfg->mma_min && ne00 % 128 == 0 && ne11 <= 16) {
++            // simdgroup-MMA variant: 16 src0 rows x 8*nc src1 rows per simdgroup
++            const int nc = ne11 <= 8 ? 1 : 2;
++
++            auto pipeline = ggml_metal_library_get_pipeline_mul_mv_mma(lib, op, nc);
++
++            ggml_metal_kargs_mul_mv args = {
++                /*.ne00 =*/ ne00,
++                /*.ne01 =*/ ne01,
++                /*.ne02 =*/ ne02,
++                /*.nb00 =*/ nb00,
++                /*.nb01 =*/ nb01,
++                /*.nb02 =*/ nb02,
++                /*.nb03 =*/ nb03,
++                /*.ne10 =*/ ne10,
++                /*.ne11 =*/ ne11,
++                /*.ne12 =*/ ne12,
++                /*.nb10 =*/ nb10,
++                /*.nb11 =*/ nb11,
++                /*.nb12 =*/ nb12,
++                /*.nb13 =*/ nb13,
++                /*.ne0  =*/ ne0,
++                /*.ne1  =*/ ne1,
++                /*.nr0  =*/ pipeline.nr0,
++                /*.r2   =*/ r2,
++                /*.r3   =*/ r3,
++            };
++
++            ggml_metal_encoder_set_pipeline(enc, pipeline);
++            ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++            ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
++            ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
++            ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
++
++            ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
++
++            ggml_metal_encoder_dispatch_threadgroups(enc, ((ne01 + pipeline.nr0 - 1)/pipeline.nr0), ((ne11 + pipeline.nr1 - 1)/pipeline.nr1), ne12*ne13, 32, pipeline.nsg, 1);
++
++            return 1;
++        }
 +
 +        int nr0 = cfg->nr0;
 +        if (nr0 == 0) {
@@ -218,10 +300,10 @@ index b4e87cb2c..2d10245fb 100644
      // these should be efficient for BS [2, ~8]
      if (op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0) &&
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 8e2df2765..607857e33 100644
+index 8e2df2765..437170582 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -3393,3 +3393,355 @@ template [[host_name("kernel_mul_mv_id_iq2_s_f32")]]   kernel kernel_mul_mv_id_t
+@@ -3393,3 +3393,552 @@ template [[host_name("kernel_mul_mv_id_iq2_s_f32")]]   kernel kernel_mul_mv_id_t
  template [[host_name("kernel_mul_mv_id_iq4_nl_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq4_nl_f32_impl <N_R0_IQ4_NL>>>;
  template [[host_name("kernel_mul_mv_id_iq4_xs_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq4_xs_f32_impl <N_R0_IQ4_XS>>>;
  template [[host_name("kernel_mul_mv_id_tq2_0_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_tq2_0_f32_impl  <N_R0_TQ2_0>>>;
@@ -577,6 +659,203 @@ index 8e2df2765..607857e33 100644
 +MV_MR_INST_ALL_R(q8_0, 1)
 +MV_MR_INST_ALL_R(q8_0, 2)
 +MV_MR_INST_ALL_R(q8_0, 4)
++
++// ======================= small-batch simdgroup-MMA mat-vec ("mv_mma"), 2..16 src1 rows
++//
++// Why not the scalar multi-row kernel above for B > 4: every src1 value it loads feeds only NR0 FMAs, so at
++// B = 8..16 it is bound by src1 loads from L1 (~0.5-0.7 TB/s), not by the weight stream. Here the reuse is done
++// by 8x8 simdgroup matrices instead: per K step of 128 the threadgroup stages the src1 tile (8*NC rows x 128,
++// half) once, each simdgroup dequantizes its 16 src0 rows x 128 into its own threadgroup slice (half), and
++// multiplies 16 x 128 by 128 x 8*NC with simdgroup_multiply_accumulate (f32 accumulators). Unlike kernel_mul_mm
++// the src1 tile is 8 or 16 rows, not 32, and the weights are dequantized with wide loads, 64 weights per lane.
++//
++// threadgroup: 4 simdgroups (128 threads), 64 src0 rows; grid: (ceil(ne01/64), ceil(ne11/(8*NC)), ne12*ne13)
++// requires ne00 % 128 == 0
++
++#define MV_MMA_NSG 4
++#define MV_MMA_RS  16   // src0 rows per simdgroup
++#define MV_MMA_KS  128  // K step
++
++// dequantize 64 weights of one src0 row into dst (threadgroup, half): part p (0/1) of the 128-wide K step at k0
++static inline void mv_mma_deq(device const block_q4_K * x, int k0, short p, threadgroup half * dst) {
++    device const block_q4_K * xb = x + k0/QK_K;
++    const short h = (k0 % QK_K)/MV_MMA_KS;            // which half of the super-block
++    const short j = 4*h + 2*p;                        // first of the two 32-element sub-blocks (low nibbles)
++
++    device const uchar * s = xb->scales;
++    uchar sc0, m0, sc1, m1;
++    if (j < 4) {
++        sc0 = s[j] & 63; m0 = s[j + 4] & 63;
++        sc1 = s[j + 1] & 63; m1 = s[j + 5] & 63;
++    } else {
++        sc0 = (s[j + 4] & 0xF) | ((s[j - 4] >> 6) << 4); m0 = (s[j + 4] >> 4) | ((s[j    ] >> 6) << 4);
++        sc1 = (s[j + 5] & 0xF) | ((s[j - 3] >> 6) << 4); m1 = (s[j + 5] >> 4) | ((s[j + 1] >> 6) << 4);
++    }
++    const float d = xb->d, dmin = xb->dmin;
++    const float dl0 = d*sc0, ml0 = dmin*m0;
++    const float dl1 = d*sc1, ml1 = dmin*m1;
++
++    device const uchar4 * q = (device const uchar4 *) (xb->qs + 32*j/2);
++    threadgroup half4 * d4 = (threadgroup half4 *) dst;
++    FOR_UNROLL (short i = 0; i < 8; ++i) {
++        const uchar4 v = q[i];
++        d4[i    ] = half4(float4(v & 0xF)*dl0 - ml0);
++        d4[i + 8] = half4(float4(v >>  4)*dl1 - ml1);
++    }
++}
++
++static inline void mv_mma_deq(device const block_q8_0 * x, int k0, short p, threadgroup half * dst) {
++    threadgroup half4 * d4 = (threadgroup half4 *) dst;
++    FOR_UNROLL (short b = 0; b < 2; ++b) {
++        device const block_q8_0 * xb = x + k0/QK8_0 + 2*p + b;
++        const float d = xb->d;
++        device const packed_char4 * qs = (device const packed_char4 *) xb->qs;
++        FOR_UNROLL (short i = 0; i < 8; ++i) {
++            d4[8*b + i] = half4(float4(char4(qs[i]))*d);
++        }
++    }
++}
++
++static inline void mv_mma_deq(device const block_q6_K * x, int k0, short p, threadgroup half * dst) {
++    device const block_q6_K * xb = x + k0/QK_K;
++    const short h = (k0 % QK_K)/MV_MMA_KS;
++
++    // block_q6_K is 210 bytes: only 2-byte alignment
++    device const packed_uchar4 * ql0 = (device const packed_uchar4 *) (xb->ql + 64*h + 16*p);
++    device const packed_uchar4 * ql1 = (device const packed_uchar4 *) (xb->ql + 64*h + 16*p + 32);
++    device const packed_uchar4 * qh  = (device const packed_uchar4 *) (xb->qh + 32*h + 16*p);
++    device const int8_t * sc = xb->scales + 8*h + p;
++    const float d = xb->d;
++    const float s0 = d*sc[0], s1 = d*sc[2], s2 = d*sc[4], s3 = d*sc[6];
++
++    // element l = 16p + i (i < 16) of each 32-wide group g lands at g*32 + 16p + i
++    threadgroup half4 * d4 = (threadgroup half4 *) (dst - 64*p); // dst points at 64*p within the row
++    FOR_UNROLL (short i = 0; i < 4; ++i) {
++        const uchar4 a = uchar4(ql0[i]);
++        const uchar4 b = uchar4(ql1[i]);
++        const uchar4 c = uchar4(qh[i]);
++        d4[ 0 + 4*p + i] = half4((float4(char4((a & 0xF) | ((c & 0x03) << 4))) - 32.f)*s0);
++        d4[ 8 + 4*p + i] = half4((float4(char4((b & 0xF) | ((c & 0x0C) << 2))) - 32.f)*s1);
++        d4[16 + 4*p + i] = half4((float4(char4((a >>  4) | ((c & 0x30) << 0))) - 32.f)*s2);
++        d4[24 + 4*p + i] = half4((float4(char4((b >>  4) | ((c & 0xC0) >> 2))) - 32.f)*s3);
++    }
++}
++
++template<typename block_q, short NC>
++kernel void kernel_mul_mv_mma_f32(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem [[threadgroup(0)]],
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiitg[[thread_index_in_threadgroup]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    constexpr short NB = 8*NC; // src1 rows per threadgroup
++
++    threadgroup half * sb = (threadgroup half *) shmem;                                   // [NB][KS]
++    threadgroup half * sa = (threadgroup half *) shmem + NB*MV_MMA_KS + sgitg*MV_MMA_RS*MV_MMA_KS; // [RS][KS]
++
++    const int r0 = tgpig.x*(MV_MMA_NSG*MV_MMA_RS) + sgitg*MV_MMA_RS; // first src0 row of this simdgroup
++    const int r1 = tgpig.y*NB;
++    const int im = tgpig.z;
++
++    const uint i12 = im%FC_mul_mv_ne12;
++    const uint i13 = im/FC_mul_mv_ne12;
++
++    const uint64_t offset0 = (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
++
++    // dequant role of this lane: src0 row r0 + tiisg/2, half p of the K step
++    const short drow = tiisg/2;
++    const short dp   = tiisg%2;
++    device const block_q * xr = (device const block_q *) (src0 + offset0 + (uint64_t) min(r0 + drow, args.ne01 - 1)*args.nb01);
++    threadgroup half * sa_dst = sa + drow*MV_MMA_KS + 64*dp;
++
++    // src1 staging role: row bn, 16 consecutive k
++    const short bn = tiitg/8;
++    const short bk = 16*(tiitg%8);
++    const bool  b_active = bn < NB;
++    const bool  b_valid  = b_active && (r1 + bn < args.ne11);
++    device const float4 * yr = (device const float4 *) (src1 + (uint64_t) min(r1 + bn, args.ne11 - 1)*args.nb11 + (uint64_t)i12*args.nb12 + (uint64_t)i13*args.nb13) + bk/4;
++
++    simdgroup_float8x8 mc[2][NC];
++    FOR_UNROLL (short i = 0; i < 2; ++i) {
++        FOR_UNROLL (short j = 0; j < NC; ++j) {
++            mc[i][j] = make_filled_simdgroup_matrix<float, 8>(0.f);
++        }
++    }
++
++    for (int k0 = 0; k0 < args.ne00; k0 += MV_MMA_KS) {
++        // load next weights and src1 before the barrier that protects the previous step's reads
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        if (b_active) {
++            threadgroup half4 * sb4 = (threadgroup half4 *) (sb + bn*MV_MMA_KS + bk);
++            FOR_UNROLL (short i = 0; i < 4; ++i) {
++                sb4[i] = b_valid ? half4(yr[k0/4 + i]) : half4(0.h);
++            }
++        }
++
++        mv_mma_deq(xr, k0, dp, sa_dst);
++
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        FOR_UNROLL (short kb = 0; kb < MV_MMA_KS/8; ++kb) {
++            simdgroup_half8x8 ma[2];
++            simdgroup_half8x8 mb[NC];
++            FOR_UNROLL (short i = 0; i < 2; ++i) {
++                simdgroup_load(ma[i], sa + 8*i*MV_MMA_KS + 8*kb, MV_MMA_KS, 0, false);
++            }
++            FOR_UNROLL (short j = 0; j < NC; ++j) {
++                simdgroup_load(mb[j], sb + 8*j*MV_MMA_KS + 8*kb, MV_MMA_KS, 0, true);
++            }
++            FOR_UNROLL (short i = 0; i < 2; ++i) {
++                FOR_UNROLL (short j = 0; j < NC; ++j) {
++                    simdgroup_multiply_accumulate(mc[i][j], ma[i], mb[j], mc[i][j]);
++                }
++            }
++        }
++    }
++
++    // C[row][n] -> dst[n*ne0 + row]
++    device float * D = (device float *) dst + (uint64_t)im*args.ne0*args.ne1;
++
++    if (r0 + MV_MMA_RS <= args.ne01 && r1 + NB <= args.ne11) {
++        FOR_UNROLL (short i = 0; i < 2; ++i) {
++            FOR_UNROLL (short j = 0; j < NC; ++j) {
++                simdgroup_store(mc[i][j], D + (uint64_t)(r1 + 8*j)*args.ne0 + r0 + 8*i, args.ne0, 0, true);
++            }
++        }
++    } else {
++        // partial tile: go through this simdgroup's own threadgroup slice (RS x KS halves >= RS x NB floats);
++        // only this simdgroup ever reads that slice, so a simdgroup barrier is enough (the branch is not uniform
++        // across the threadgroup)
++        simdgroup_barrier(mem_flags::mem_threadgroup);
++        threadgroup float * sc = (threadgroup float *) sa; // [NB][RS]
++        FOR_UNROLL (short i = 0; i < 2; ++i) {
++            FOR_UNROLL (short j = 0; j < NC; ++j) {
++                simdgroup_store(mc[i][j], sc + 8*j*MV_MMA_RS + 8*i, MV_MMA_RS, 0, true);
++            }
++        }
++        simdgroup_barrier(mem_flags::mem_threadgroup);
++        for (short e = tiisg; e < NB*MV_MMA_RS; e += N_SIMDWIDTH) {
++            const short n = e/MV_MMA_RS, row = e%MV_MMA_RS;
++            if (r1 + n < args.ne11 && r0 + row < args.ne01) {
++                D[(uint64_t)(r1 + n)*args.ne0 + r0 + row] = sc[e];
++            }
++        }
++    }
++}
++
++typedef decltype(kernel_mul_mv_mma_f32<block_q4_K, 1>) mul_mv_mma_t;
++
++template [[host_name("kernel_mul_mv_mma_q4_K_f32_nc_1")]] kernel mul_mv_mma_t kernel_mul_mv_mma_f32<block_q4_K, 1>;
++template [[host_name("kernel_mul_mv_mma_q4_K_f32_nc_2")]] kernel mul_mv_mma_t kernel_mul_mv_mma_f32<block_q4_K, 2>;
++template [[host_name("kernel_mul_mv_mma_q6_K_f32_nc_1")]] kernel mul_mv_mma_t kernel_mul_mv_mma_f32<block_q6_K, 1>;
++template [[host_name("kernel_mul_mv_mma_q6_K_f32_nc_2")]] kernel mul_mv_mma_t kernel_mul_mv_mma_f32<block_q6_K, 2>;
++template [[host_name("kernel_mul_mv_mma_q8_0_f32_nc_1")]] kernel mul_mv_mma_t kernel_mul_mv_mma_f32<block_q8_0, 1>;
++template [[host_name("kernel_mul_mv_mma_q8_0_f32_nc_2")]] kernel mul_mv_mma_t kernel_mul_mv_mma_f32<block_q8_0, 2>;
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 index f650e0123..7affb71e9 100644
 --- a/tests/test-backend-ops.cpp

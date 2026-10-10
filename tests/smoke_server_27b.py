@@ -84,7 +84,10 @@ import openai  # noqa: E402
 client = openai.OpenAI(base_url=BASE + "/v1", api_key="none", timeout=1800)
 MODEL = client.models.list().data[0].id
 NOTHINK = {"chat_template_kwargs": {"enable_thinking": False}}
-out = {"model": a.model, "drafter": a.drafter, "time": time.strftime("%F %T")}
+power = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout.split("\n")[0]
+out = {"model": a.model, "drafter": a.drafter, "time": time.strftime("%F %T"),
+       "power": power.split("'")[1] if "'" in power else power}
+print(f"[smoke] power source: {out['power']}", flush=True)
 
 
 def chat(messages, stream=False, **kw):
@@ -131,7 +134,7 @@ if not a.skip_speed:
     cfg_name = "_".join(a.drafter.split(":")[1:]).replace("=", "")
     for l in open(ROOT / "results" / "mlx_mtp.jsonl"):
         r = json.loads(l)
-        if r["config"] == cfg_name and r.get("model", "").endswith(a.model.split("/")[-1]):
+        if r["config"] == cfg_name and r["method"] == a.drafter.split(":")[0] and r.get("model", "").endswith(a.model.split("/")[-1]):
             cli[r["prompt_id"]] = r
     rows = []
     for p in prompts:

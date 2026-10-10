@@ -1,0 +1,2 @@
+{"experiment": "qmm_session", "stage": "start", "power": "AC Power", "loadavg": 3.14, "time": "2026-10-10 10:23:47"}
+{"experiment": "qmm_session", "stage": "verify-cost done", "power": "AC Power", "loadavg": 2.8, "time": "2026-10-10 10:25:07"}

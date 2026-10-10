@@ -234,7 +234,13 @@ def pick_config(M: int, N: int, K: int, bits: int, group_size: int = 64) -> Tupl
     27B models' shapes; other shapes use a rule that was within a few % of the
     best on synthetic shapes (notes/mlx-qmm-kernel.md).
     """
-    c = _tuned().get(f"{bits},{group_size},{N},{K},{M}")
+    tuned = _tuned()
+    c = tuned.get(f"{bits},{group_size},{N},{K},{M}")
+    if c is None:  # nearest tuned M with the same number of 8-row tiles
+        for m2 in sorted(range(1, 17), key=lambda m: abs(m - M)):
+            if (m2 + 7) // 8 == (M + 7) // 8 and f"{bits},{group_size},{N},{K},{m2}" in tuned:
+                c = tuned[f"{bits},{group_size},{N},{K},{m2}"]
+                break
     if c is not None and group_size >= 8 * c[2] and K % max(32 * c[2] * c[3], group_size) == 0:
         return tuple(c)
     if M <= 8:
@@ -416,16 +422,20 @@ def parse_range(spec) -> Optional[Tuple[int, int]]:
     return lo, hi
 
 
-def install(model: nn.Module, m_range=(2, 16)) -> int:
+MIN_N = 256  # narrower outputs (in_proj_a/b, N = 48) launch too few threadgroups: 2.9x MLX's time
+
+
+def install(model: nn.Module, m_range=(2, 16), min_n: int = MIN_N) -> int:
     """Route eligible QuantizedLinear layers of ``model`` through ``qmm`` for
-    ``m_range`` rows (None uninstalls). Returns the number of layers routed."""
+    ``m_range`` rows (None uninstalls). Layers with fewer than ``min_n``
+    outputs stay on mx.quantized_matmul. Returns the number of layers routed."""
     m_range = parse_range(m_range)
     if m_range is None:
         return uninstall(model)
     n = 0
     for _, mod in model.named_modules():
         if isinstance(mod, nn.QuantizedLinear) and getattr(mod, "mode", "affine") == "affine" \
-                and "biases" in mod and supported(mod["scales"].dtype, mod["weight"], mod["scales"],
+                and "biases" in mod and mod["weight"].shape[0] >= min_n and supported(mod["scales"].dtype, mod["weight"], mod["scales"],
                                                   mod["biases"], mod.group_size, mod.bits):
             mod.__class__ = FastQuantizedLinear
             mod._qmm_lo, mod._qmm_hi = m_range

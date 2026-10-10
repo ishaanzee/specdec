@@ -87,6 +87,7 @@ def test_hook_routes_by_rows():
         assert mx.allclose(y, stock[M], atol=1e-4, rtol=1e-4).item()
     assert "_qmm_lo" not in lin and len(lin.parameters()) == 4  # no stray child entries
     assert Q.uninstall(model) == 1 and type(lin) is nn.QuantizedLinear
+    assert Q.install(model, "2-16", min_n=512) == 0  # N = 256 < min_n stays on MLX
     assert Q.parse_range("off") is None and Q.parse_range("8") == (2, 8)
 
 

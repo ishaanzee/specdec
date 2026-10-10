@@ -105,7 +105,7 @@ def run_shape(N, K, bits, gs, Ms, reps, config=None):
     return rows
 
 
-def tune(shape, reps, Ms=tuple(range(2, 17))):
+def tune(shape, reps, Ms=(2, 4, 6, 8, 9, 12, 16)):
     N, K, bits, gs = shape
     ws, gb = make_weights(N, K, bits, gs)
     cfgs = [(SN, NSG, KS, KP) for SN in (1, 2, 4) for NSG in (2, 4, 8) for KS in (1, 2)
