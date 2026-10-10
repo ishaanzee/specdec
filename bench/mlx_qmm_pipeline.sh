@@ -6,8 +6,8 @@ cd "$(dirname "$0")/.." || exit 1
 PY=.venv/bin/python
 export HF_HUB_OFFLINE=1
 pwr() { pmset -g batt | head -1; }  # battery timings are suspect
-echo "== tune $(date) [$(pwr)]";      $PY bench/mlx_qmm_kernel_bench.py --tune --reps 5 > logs/qmm_tune.log 2>&1
-echo "== microbench $(date) [$(pwr)]"; $PY bench/mlx_qmm_kernel_bench.py --reps 9 > logs/qmm_bench.log 2>&1
+if [ -z "$QMM_SKIP_TUNE" ]; then echo "== tune $(date) [$(pwr)]";      $PY bench/mlx_qmm_kernel_bench.py --tune --reps 5 > logs/qmm_tune.log 2>&1; fi
+if [ -z "$QMM_SKIP_TUNE" ]; then echo "== microbench $(date) [$(pwr)]"; $PY bench/mlx_qmm_kernel_bench.py --reps 9 > logs/qmm_bench.log 2>&1; fi
 echo "== unit tests $(date) [$(pwr)]"; $PY -m pytest tests/test_qmm_kernel.py -q > logs/qmm_tests.log 2>&1
 echo "== session $(date) [$(pwr)]";    $PY bench/mlx_qmm_session.py --range "${QMM_RANGE:-2-16}" > logs/qmm_session.log 2>&1
 echo "== fp32 $(date) [$(pwr)]"

@@ -26,6 +26,7 @@ SPECDEC_27B=1 scripts/gpu.py .venv/bin/python -m pytest tests/test_equivalence_2
 | `drafters.py` | `Drafter` protocol, `NgramDrafter`, `DraftModelDrafter` (optionally adaptive k), `HybridDrafter`, `NoDrafter` |
 | `mtp.py` | Qwen3.8's MTP layer: `MTPHead`, `load_mtp_head` (weights from `scripts/extract_mtp.py`), `MTPDrafter` (best: `mtp:k=3:vocab=65536`, 2.69x) |
 | `decode.py` | `greedy_generate` (baseline), `speculative_generate` (the loop) |
+| `qmm_kernel.py` | opt-in small-batch quantized matmul (weights read once for 5-16 rows; `SPECDEC_QMM=5-16` or config key `qmm=5-16`; best: `mtp:k=7:vocab=65536:qmm=5-16`, 26.6 tok/s), see `notes/mlx-qmm-kernel.md` |
 | `bench.py` | results rows in the shared schema, verify-cost curve, mismatch diagnosis |
 | `server.py` | OpenAI-compatible HTTP server with prompt caching across turns (section "Server" below) |
 

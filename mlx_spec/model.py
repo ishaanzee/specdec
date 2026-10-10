@@ -60,8 +60,8 @@ class SpecModel:
     def __init__(self, model: nn.Module, rollback: str = "replay", qmm=None):
         self.model = model
         self.rollback = rollback
-        # Opt-in: small-batch quantized matmul for verify passes of 2..16 rows
-        # (qmm_kernel.py). qmm="2-16" or env SPECDEC_QMM=2-16; off by default.
+        # Opt-in: small-batch quantized matmul for verify passes of 5..16 rows
+        # (qmm_kernel.py). qmm="5-16" or env SPECDEC_QMM=5-16; off by default.
         qmm = qmm if qmm is not None else os.environ.get("SPECDEC_QMM")
         if qmm:
             from .qmm_kernel import install

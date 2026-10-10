@@ -26,12 +26,12 @@ accumulators per lane and ``simd_sum`` at the end. It is ALU-bound from M ~ 4
 on (scalar FMAs, x reloaded per row) and kept only for the comparison in the
 notes (``qmm_simd``).
 
-Opt-in hook: ``install(model, (2, 16))`` swaps the class of every eligible
+Opt-in hook: ``install(model, (5, 16))`` swaps the class of every eligible
 ``nn.QuantizedLinear`` in ``model`` to ``FastQuantizedLinear``, which sends
-calls with 2 <= rows <= 16 to ``qmm`` and everything else (decode steps,
+calls with 5 <= rows <= 16 to ``qmm`` and everything else (decode steps,
 prefill) to ``mx.quantized_matmul``; ``uninstall(model)`` reverts. The env var
-``SPECDEC_QMM=2-16`` makes ``SpecModel`` install it, and the benchmark config
-key ``qmm=2-16`` (e.g. ``mtp:k=6:vocab=65536:qmm=2-16``) toggles it per run.
+``SPECDEC_QMM=5-16`` makes ``SpecModel`` install it, and the benchmark config
+key ``qmm=5-16`` (e.g. ``mtp:k=7:vocab=65536:qmm=5-16``, the best config) toggles it per run.
 """
 
 from __future__ import annotations
@@ -425,7 +425,7 @@ def parse_range(spec) -> Optional[Tuple[int, int]]:
 MIN_N = 256  # narrower outputs (in_proj_a/b, N = 48) launch too few threadgroups: 2.9x MLX's time
 
 
-def install(model: nn.Module, m_range=(2, 16), min_n: int = MIN_N) -> int:
+def install(model: nn.Module, m_range=(5, 16), min_n: int = MIN_N) -> int:
     """Route eligible QuantizedLinear layers of ``model`` through ``qmm`` for
     ``m_range`` rows (None uninstalls). Layers with fewer than ``min_n``
     outputs stay on mx.quantized_matmul. Returns the number of layers routed."""
