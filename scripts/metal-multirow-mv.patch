@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-common.cpp b/ggml/src/ggml-metal/ggml-metal-common.cpp
-index 05755eb3b..98749ead3 100644
+index 05755eb3b..343a4a191 100644
 --- a/ggml/src/ggml-metal/ggml-metal-common.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-common.cpp
-@@ -5,8 +5,69 @@
+@@ -5,8 +5,96 @@
  #include "ggml-impl.h"
  #include "ggml-backend-impl.h"
  
@@ -23,8 +23,8 @@ index 05755eb3b..98749ead3 100644
 +        c.max_r    = env_int("GGML_METAL_MV_MULTIROW_R",   16);
 +        c.nr0      = env_int("GGML_METAL_MV_MULTIROW_NR0",  0);
 +        c.nsg      = env_int("GGML_METAL_MV_MULTIROW_NSG",  2);
-+        c.mma_min  = env_int("GGML_METAL_MV_MULTIROW_MMA",  5);
-+        c.mma_nsg  = env_int("GGML_METAL_MV_MMA_NSG",       2);
++        c.mma_min  = env_int("GGML_METAL_MV_MULTIROW_MMA",  0); // 0 = per-type table
++        c.mma_nsg  = env_int("GGML_METAL_MV_MMA_NSG",       4);
 +        c.mma_nsg  = c.mma_nsg < 1 ? 1 : (c.mma_nsg > 8 ? 8 : c.mma_nsg);
 +
 +        c.max_r = c.max_r < 2 ? 2 : (c.max_r > 16 ? 16 : c.max_r);
@@ -66,17 +66,44 @@ index 05755eb3b..98749ead3 100644
 +           src1->nb[1] % 16 == 0 && src1->nb[2] % 16 == 0 && src1->nb[3] % 16 == 0 &&
 +           ((uintptr_t) src1->data) % 16 == 0 &&
 +           src0->ne[0] % ggml_blck_size(src0->type) == 0 &&
-+           ne11 >= 2 && ne11 <= cfg->max_ne11;
++           ne11 >= 2 && ne11 <= cfg->max_ne11 &&
++           ggml_metal_mv_mr_kernel(op) != 0;
++}
++
++int ggml_metal_mv_mr_kernel(const struct ggml_tensor * op) {
++    const ggml_metal_mv_mr_cfg * cfg = ggml_metal_mv_mr_get_cfg();
++
++    const int64_t ne00 = op->src[0]->ne[0];
++    const int64_t ne11 = op->src[1]->ne[1];
++
++    const bool mma_ok = ne00 % 128 == 0 && ne11 <= 16;
++
++    if (cfg->mma_min > 0) {
++        // explicit override (tuning): MMA kernel from mma_min rows on, scalar multi-row kernel below
++        return (mma_ok && ne11 >= cfg->mma_min) ? 2 : 1;
++    }
++
++    // default: measured on M3 Pro (notes/llama-metal-kernel.md), MMA kernel where it beats the stock kernels,
++    // stock path (mul_mv / mul_mv_ext / mul_mm) elsewhere
++    int lo = 99, hi = 0;
++    switch (op->src[0]->type) {
++        case GGML_TYPE_Q4_K: lo = 4; hi = 16; break; // stock mul_mv wins at 2-3
++        case GGML_TYPE_Q6_K: lo = 4; hi = 16; break;
++        case GGML_TYPE_Q8_0: lo = 5; hi =  8; break; // stock mul_mv_ext wins at 2-4, mul_mm at 9-16
++        default: break;
++    }
++
++    return (mma_ok && ne11 >= lo && ne11 <= hi) ? 2 : 0;
 +}
 +
  bool ggml_metal_op_mul_mat_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm) {
      const int64_t ne00 = op->src[0]->ne[0];
      const int64_t ne11 = op->src[1]->ne[1];
 diff --git a/ggml/src/ggml-metal/ggml-metal-common.h b/ggml/src/ggml-metal/ggml-metal-common.h
-index 66abdb52e..1195afad4 100644
+index 66abdb52e..95a0567ff 100644
 --- a/ggml/src/ggml-metal/ggml-metal-common.h
 +++ b/ggml/src/ggml-metal/ggml-metal-common.h
-@@ -49,6 +49,26 @@ void ggml_graph_optimize(struct ggml_cgraph * gf);
+@@ -49,6 +49,27 @@ void ggml_graph_optimize(struct ggml_cgraph * gf);
  
  // mat-mat vs mat-vec dispatch; used by both supports_op and ggml_metal_op_mul_mat*
  bool ggml_metal_op_mul_mat_use_mm   (const struct ggml_tensor * op, bool has_simdgroup_mm);
@@ -86,9 +113,9 @@ index 66abdb52e..1195afad4 100644
 +//   GGML_METAL_MV_MULTIROW_R=N    max src1 rows per threadgroup (2..16)          (default 16)
 +//   GGML_METAL_MV_MULTIROW_NR0=N  src0 rows per simdgroup (1, 2 or 4)            (default: per type)
 +//   GGML_METAL_MV_MULTIROW_NSG=N  simdgroups per threadgroup                     (default 2)
-+//   GGML_METAL_MV_MULTIROW_MMA=N  use the simdgroup-MMA variant (kernel_mul_mv_mma_*) for ne11 >= N
-+//                                 (default 5; 99 = never, 2 = always)
-+//   GGML_METAL_MV_MMA_NSG=N       simdgroups per threadgroup of the MMA variant  (default 2)
++//   GGML_METAL_MV_MULTIROW_MMA=N  tuning override: MMA variant (kernel_mul_mv_mma_*) for ne11 >= N, scalar
++//                                 multi-row kernel below (default 0 = per-type table of measured winners)
++//   GGML_METAL_MV_MMA_NSG=N       simdgroups per threadgroup of the MMA variant  (default 4)
 +struct ggml_metal_mv_mr_cfg {
 +    bool enabled;
 +    int  max_ne11;
@@ -100,11 +127,12 @@ index 66abdb52e..1195afad4 100644
 +};
 +const struct ggml_metal_mv_mr_cfg * ggml_metal_mv_mr_get_cfg(void);
 +bool ggml_metal_op_mul_mat_use_mv_mr(const struct ggml_tensor * op);
++int  ggml_metal_mv_mr_kernel(const struct ggml_tensor * op); // 0 = stock path, 1 = scalar multi-row, 2 = MMA
  bool ggml_metal_op_mul_mat_id_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm);
  
  #ifdef __cplusplus
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index bf3d07e78..042c6e9db 100644
+index bf3d07e78..3921c3183 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -759,6 +759,78 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_ext(ggml_
@@ -174,11 +202,11 @@ index bf3d07e78..042c6e9db 100644
 +    }
 +
 +    // 16*nsg src0 rows x 8*nc src1 rows per threadgroup;
-+    // threadgroup memory per simdgroup: src1 tile (8*nc x 128 half) + weight tile (16 x 128 half)
++    // threadgroup memory: shared src1 tile (8*nc x 128 half) + one weight tile (16 x 128 half) per simdgroup
 +    res.nr0  = 16*nsg;
 +    res.nr1  = 8*nc;
 +    res.nsg  = nsg;
-+    res.smem = (size_t) nsg*(8*nc + 16)*128*sizeof(uint16_t);
++    res.smem = (size_t) (8*nc + 16*nsg)*128*sizeof(uint16_t);
 +
 +    return res;
 +}
@@ -200,7 +228,7 @@ index ced33aadf..002ca5574 100644
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv            (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0    (ggml_metal_library_t lib, int ne02, int ne20);
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index b4e87cb2c..497fcef5e 100644
+index b4e87cb2c..f26d90fd4 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -2414,6 +2414,99 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
@@ -211,7 +239,7 @@ index b4e87cb2c..497fcef5e 100644
 +        // multi-row mat-vec: one pass over src0 serves up to 16 src1 rows
 +        const ggml_metal_mv_mr_cfg * cfg = ggml_metal_mv_mr_get_cfg();
 +
-+        if (ne11 >= cfg->mma_min && ne00 % 128 == 0 && ne11 <= 16) {
++        if (ggml_metal_mv_mr_kernel(op) == 2) {
 +            // simdgroup-MMA variant: 16 src0 rows x 8*nc src1 rows per simdgroup
 +            const int nc = ne11 <= 8 ? 1 : 2;
 +
@@ -304,10 +332,10 @@ index b4e87cb2c..497fcef5e 100644
      // these should be efficient for BS [2, ~8]
      if (op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0) &&
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 8e2df2765..7f7df090c 100644
+index 8e2df2765..9f7851331 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -3393,3 +3393,554 @@ template [[host_name("kernel_mul_mv_id_iq2_s_f32")]]   kernel kernel_mul_mv_id_t
+@@ -3393,3 +3393,597 @@ template [[host_name("kernel_mul_mv_id_iq2_s_f32")]]   kernel kernel_mul_mv_id_t
  template [[host_name("kernel_mul_mv_id_iq4_nl_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq4_nl_f32_impl <N_R0_IQ4_NL>>>;
  template [[host_name("kernel_mul_mv_id_iq4_xs_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq4_xs_f32_impl <N_R0_IQ4_XS>>>;
  template [[host_name("kernel_mul_mv_id_tq2_0_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_tq2_0_f32_impl  <N_R0_TQ2_0>>>;
@@ -668,8 +696,8 @@ index 8e2df2765..7f7df090c 100644
 +//
 +// Why not the scalar multi-row kernel above for B > 4: every src1 value it loads feeds only NR0 FMAs, so at
 +// B = 8..16 it is bound by src1 loads from L1 (~0.5-0.7 TB/s), not by the weight stream. Here the reuse is done
-+// by 8x8 simdgroup matrices instead: per K step of 128 each simdgroup stages the src1 tile (8*NC rows x 128,
-+// half) in its own threadgroup slice, dequantizes dequantizes its 16 src0 rows x 128 into its own threadgroup slice (half), and
++// by 8x8 simdgroup matrices instead: per K step of 128 the threadgroup stages the src1 tile (8*NC rows x 128,
++// half) once, each simdgroup dequantizes dequantizes its 16 src0 rows x 128 into its own threadgroup slice (half), and
 +// multiplies 16 x 128 by 128 x 8*NC with simdgroup_multiply_accumulate (f32 accumulators). Unlike kernel_mul_mm
 +// the src1 tile is 8 or 16 rows, not 32, and the weights are dequantized with wide loads, 64 weights per lane.
 +//
@@ -679,13 +707,35 @@ index 8e2df2765..7f7df090c 100644
 +#define MV_MMA_RS  16   // src0 rows per simdgroup
 +#define MV_MMA_KS  128  // K step
 +
-+// dequantize 64 weights of one src0 row into dst (threadgroup, half): part p (0/1) of the 128-wide K step at k0
-+static inline void mv_mma_deq(device const block_q4_K * x, int k0, short p, threadgroup half * dst) {
-+    device const block_q4_K * xb = x + k0/QK_K;
-+    const short h = (k0 % QK_K)/MV_MMA_KS;            // which half of the super-block
-+    const short j = 4*h + 2*p;                        // first of the two 32-element sub-blocks (low nibbles)
++// Weight dequantization is split into a raw load (issued one K step ahead, so the next weights are in flight
++// during the barrier + MMAs of the current step) and a convert/store into threadgroup memory.
++// Each lane handles 64 weights of one src0 row: part p (0/1) of the 128-wide K step at k0.
 +
-+    device const uchar * s = xb->scales;
++struct mv_mma_raw_q4_K { half2 dm; uint sc[3]; uint4 q[2]; };
++struct mv_mma_raw_q8_0 { half d[2]; char4 q[16]; };
++struct mv_mma_raw_q6_K { half d; char sc[4]; uchar4 a[4]; uchar4 b[4]; uchar4 c[4]; };
++
++template<typename block_q> struct mv_mma_raw;
++template<> struct mv_mma_raw<block_q4_K> { typedef mv_mma_raw_q4_K type; };
++template<> struct mv_mma_raw<block_q8_0> { typedef mv_mma_raw_q8_0 type; };
++template<> struct mv_mma_raw<block_q6_K> { typedef mv_mma_raw_q6_K type; };
++
++static inline void mv_mma_load(device const block_q4_K * x, int k0, short p, thread mv_mma_raw_q4_K & r) {
++    device const block_q4_K * xb = x + k0/QK_K;
++    const short h = (k0 % QK_K)/MV_MMA_KS;
++    device const uint * w = (device const uint *) xb; // 144-byte blocks: 16-byte aligned
++    r.dm    = as_type<half2>(w[0]);
++    r.sc[0] = w[1]; r.sc[1] = w[2]; r.sc[2] = w[3];
++    device const uint4 * q = (device const uint4 *) (xb->qs + 32*(2*h + p));
++    r.q[0] = q[0];
++    r.q[1] = q[1];
++}
++
++static inline void mv_mma_store(thread const mv_mma_raw_q4_K & r, int k0, short p, threadgroup half * dst) {
++    const short h = (k0 % QK_K)/MV_MMA_KS;
++    const short j = 4*h + 2*p; // sub-blocks j (low nibbles) and j + 1 (high nibbles)
++
++    thread const uchar * s = (thread const uchar *) r.sc;
 +    uchar sc0, m0, sc1, m1;
 +    if (j < 4) {
 +        sc0 = s[j] & 63; m0 = s[j + 4] & 63;
@@ -694,11 +744,11 @@ index 8e2df2765..7f7df090c 100644
 +        sc0 = (s[j + 4] & 0xF) | ((s[j - 4] >> 6) << 4); m0 = (s[j + 4] >> 4) | ((s[j    ] >> 6) << 4);
 +        sc1 = (s[j + 5] & 0xF) | ((s[j - 3] >> 6) << 4); m1 = (s[j + 5] >> 4) | ((s[j + 1] >> 6) << 4);
 +    }
-+    const float d = xb->d, dmin = xb->dmin;
++    const float d = r.dm[0], dmin = r.dm[1];
 +    const float dl0 = d*sc0, ml0 = dmin*m0;
 +    const float dl1 = d*sc1, ml1 = dmin*m1;
 +
-+    device const uchar4 * q = (device const uchar4 *) (xb->qs + 32*j/2);
++    thread const uchar4 * q = (thread const uchar4 *) r.q;
 +    threadgroup half4 * d4 = (threadgroup half4 *) dst;
 +    FOR_UNROLL (short i = 0; i < 8; ++i) {
 +        const uchar4 v = q[i];
@@ -707,36 +757,51 @@ index 8e2df2765..7f7df090c 100644
 +    }
 +}
 +
-+static inline void mv_mma_deq(device const block_q8_0 * x, int k0, short p, threadgroup half * dst) {
-+    threadgroup half4 * d4 = (threadgroup half4 *) dst;
++static inline void mv_mma_load(device const block_q8_0 * x, int k0, short p, thread mv_mma_raw_q8_0 & r) {
 +    FOR_UNROLL (short b = 0; b < 2; ++b) {
-+        device const block_q8_0 * xb = x + k0/QK8_0 + 2*p + b;
-+        const float d = xb->d;
++        device const block_q8_0 * xb = x + k0/QK8_0 + 2*p + b; // 34-byte blocks: 2-byte aligned
++        r.d[b] = xb->d;
 +        device const packed_char4 * qs = (device const packed_char4 *) xb->qs;
 +        FOR_UNROLL (short i = 0; i < 8; ++i) {
-+            d4[8*b + i] = half4(float4(char4(qs[i]))*d);
++            r.q[8*b + i] = char4(qs[i]);
 +        }
 +    }
 +}
 +
-+static inline void mv_mma_deq(device const block_q6_K * x, int k0, short p, threadgroup half * dst) {
-+    device const block_q6_K * xb = x + k0/QK_K;
-+    const short h = (k0 % QK_K)/MV_MMA_KS;
++static inline void mv_mma_store(thread const mv_mma_raw_q8_0 & r, int k0, short p, threadgroup half * dst) {
++    threadgroup half4 * d4 = (threadgroup half4 *) dst;
++    FOR_UNROLL (short b = 0; b < 2; ++b) {
++        const float d = r.d[b];
++        FOR_UNROLL (short i = 0; i < 8; ++i) {
++            d4[8*b + i] = half4(float4(r.q[8*b + i])*d);
++        }
++    }
++}
 +
-+    // block_q6_K is 210 bytes: only 2-byte alignment
++static inline void mv_mma_load(device const block_q6_K * x, int k0, short p, thread mv_mma_raw_q6_K & r) {
++    device const block_q6_K * xb = x + k0/QK_K;  // 210-byte blocks: 2-byte aligned
++    const short h = (k0 % QK_K)/MV_MMA_KS;
 +    device const packed_uchar4 * ql0 = (device const packed_uchar4 *) (xb->ql + 64*h + 16*p);
 +    device const packed_uchar4 * ql1 = (device const packed_uchar4 *) (xb->ql + 64*h + 16*p + 32);
 +    device const packed_uchar4 * qh  = (device const packed_uchar4 *) (xb->qh + 32*h + 16*p);
++    FOR_UNROLL (short i = 0; i < 4; ++i) {
++        r.a[i] = uchar4(ql0[i]);
++        r.b[i] = uchar4(ql1[i]);
++        r.c[i] = uchar4(qh[i]);
++    }
 +    device const int8_t * sc = xb->scales + 8*h + p;
-+    const float d = xb->d;
-+    const float s0 = d*sc[0], s1 = d*sc[2], s2 = d*sc[4], s3 = d*sc[6];
++    r.sc[0] = sc[0]; r.sc[1] = sc[2]; r.sc[2] = sc[4]; r.sc[3] = sc[6];
++    r.d = xb->d;
++}
++
++static inline void mv_mma_store(thread const mv_mma_raw_q6_K & r, int k0, short p, threadgroup half * dst) {
++    const float d = r.d;
++    const float s0 = d*r.sc[0], s1 = d*r.sc[1], s2 = d*r.sc[2], s3 = d*r.sc[3];
 +
 +    // element l = 16p + i (i < 16) of each 32-wide group g lands at g*32 + 16p + i
 +    threadgroup half4 * d4 = (threadgroup half4 *) (dst - 64*p); // dst points at 64*p within the row
 +    FOR_UNROLL (short i = 0; i < 4; ++i) {
-+        const uchar4 a = uchar4(ql0[i]);
-+        const uchar4 b = uchar4(ql1[i]);
-+        const uchar4 c = uchar4(qh[i]);
++        const uchar4 a = r.a[i], b = r.b[i], c = r.c[i];
 +        d4[ 0 + 4*p + i] = half4((float4(char4((a & 0xF) | ((c & 0x03) << 4))) - 32.f)*s0);
 +        d4[ 8 + 4*p + i] = half4((float4(char4((b & 0xF) | ((c & 0x0C) << 2))) - 32.f)*s1);
 +        d4[16 + 4*p + i] = half4((float4(char4((a >>  4) | ((c & 0x30) << 0))) - 32.f)*s2);
@@ -752,16 +817,16 @@ index 8e2df2765..7f7df090c 100644
 +        device       char * dst,
 +        threadgroup  char * shmem [[threadgroup(0)]],
 +        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiitg[[thread_index_in_threadgroup]],
 +        ushort tiisg[[thread_index_in_simdgroup]],
 +        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
 +    const short NSG = FC_mul_mv_nsg;
 +
 +    constexpr short NB = 8*NC; // src1 rows per tile
 +
-+    // every simdgroup has its own slice: src1 tile [NB][KS] then weight tile [RS][KS] (half), so the K loop
-+    // needs only simdgroup barriers (no threadgroup-wide synchronization)
-+    threadgroup half * sb = (threadgroup half *) shmem + sgitg*(NB + MV_MMA_RS)*MV_MMA_KS;
-+    threadgroup half * sa = sb + NB*MV_MMA_KS;
++    // shared src1 tile [NB][KS], then one weight tile [RS][KS] per simdgroup (all half)
++    threadgroup half * sb = (threadgroup half *) shmem;
++    threadgroup half * sa = sb + NB*MV_MMA_KS + sgitg*MV_MMA_RS*MV_MMA_KS;
 +
 +    const int r0 = (tgpig.x*NSG + sgitg)*MV_MMA_RS; // first src0 row of this simdgroup
 +    const int r1 = tgpig.y*NB;
@@ -778,15 +843,8 @@ index 8e2df2765..7f7df090c 100644
 +    device const block_q * xr = (device const block_q *) (src0 + offset0 + (uint64_t) min(r0 + drow, args.ne01 - 1)*args.nb01);
 +    threadgroup half * sa_dst = sa + drow*MV_MMA_KS + 64*dp;
 +
-+    // src1 staging role: rows tiisg/4 + 8*c, 32 consecutive k at 32*(tiisg%4)
-+    const short bk = 32*(tiisg%4);
-+    device const float4 * yr[NC];
-+    bool b_valid[NC];
-+    FOR_UNROLL (short c = 0; c < NC; ++c) {
-+        const int n = r1 + tiisg/4 + 8*c;
-+        b_valid[c] = n < args.ne11;
-+        yr[c] = (device const float4 *) (src1 + (uint64_t) min(n, args.ne11 - 1)*args.nb11 + (uint64_t)i12*args.nb12 + (uint64_t)i13*args.nb13) + bk/4;
-+    }
++    // src1 staging: the NB x KS tile is split over all threads of the threadgroup, 4 floats at a time
++    const short nthr = NSG*N_SIMDWIDTH;
 +
 +    simdgroup_float8x8 mc[2][NC];
 +    FOR_UNROLL (short i = 0; i < 2; ++i) {
@@ -795,19 +853,31 @@ index 8e2df2765..7f7df090c 100644
 +        }
 +    }
 +
-+    for (int k0 = 0; k0 < args.ne00; k0 += MV_MMA_KS) {
-+        simdgroup_barrier(mem_flags::mem_threadgroup);
++    typename mv_mma_raw<block_q>::type raw;
++    mv_mma_load(xr, 0, dp, raw);
 +
-+        FOR_UNROLL (short c = 0; c < NC; ++c) {
-+            threadgroup half4 * sb4 = (threadgroup half4 *) (sb + (tiisg/4 + 8*c)*MV_MMA_KS + bk);
-+            FOR_UNROLL (short i = 0; i < 8; ++i) {
-+                sb4[i] = b_valid[c] ? half4(yr[c][k0/4 + i]) : half4(0.h);
++    for (int k0 = 0; k0 < args.ne00; k0 += MV_MMA_KS) {
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        for (short e = tiitg; e < NB*MV_MMA_KS/4; e += nthr) {
++            const short n  = e/(MV_MMA_KS/4);
++            const short k4 = e%(MV_MMA_KS/4);
++            half4 v = half4(0.h);
++            if (r1 + n < args.ne11) {
++                device const float4 * y4 = (device const float4 *) (src1 + (uint64_t)(r1 + n)*args.nb11 + (uint64_t)i12*args.nb12 + (uint64_t)i13*args.nb13);
++                v = half4(y4[k0/4 + k4]);
 +            }
++            *((threadgroup half4 *) (sb + n*MV_MMA_KS) + k4) = v;
 +        }
 +
-+        mv_mma_deq(xr, k0, dp, sa_dst);
++        mv_mma_store(raw, k0, dp, sa_dst);
 +
-+        simdgroup_barrier(mem_flags::mem_threadgroup);
++        // prefetch the next K step's weights; they arrive while this step multiplies
++        if (k0 + MV_MMA_KS < args.ne00) {
++            mv_mma_load(xr, k0 + MV_MMA_KS, dp, raw);
++        }
++
++        threadgroup_barrier(mem_flags::mem_threadgroup);
 +
 +        FOR_UNROLL (short kb = 0; kb < MV_MMA_KS/8; ++kb) {
 +            simdgroup_half8x8 ma[2];
@@ -836,7 +906,8 @@ index 8e2df2765..7f7df090c 100644
 +            }
 +        }
 +    } else {
-+        // partial tile: go through this simdgroup's weight slice (RS x KS halves >= NB x RS floats)
++        // partial tile: go through this simdgroup's own weight slice (RS x KS halves >= NB x RS floats);
++        // only this simdgroup reads it after the last barrier, and the branch is not threadgroup-uniform
 +        simdgroup_barrier(mem_flags::mem_threadgroup);
 +        threadgroup float * sc = (threadgroup float *) sa; // [NB][RS]
 +        FOR_UNROLL (short i = 0; i < 2; ++i) {
