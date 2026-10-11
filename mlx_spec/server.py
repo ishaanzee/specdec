@@ -1142,6 +1142,9 @@ def add_args(p: argparse.ArgumentParser):
     p.add_argument("--top-k", type=int, default=40)
     p.add_argument("--top-p", type=float, default=0.95)
     p.add_argument("--min-p", type=float, default=0.05)
+    p.add_argument("--qmm", default=None,
+                   help="small-batch quantized matmul row range for verify passes, e.g. 5-16 "
+                        "(qmm_kernel.py; same as env SPECDEC_QMM; off by default)")
     p.add_argument("--no-warmup", action="store_true")
     p.add_argument("--verbose", action="store_true", help="log every HTTP request")
 
@@ -1189,7 +1192,9 @@ def serve(a):
         info = mx.device_info()
         mx.device_info = lambda: {"max_recommended_working_set_size": 0, **info}  # Runner wires memory
     name = a.alias or a.model.rstrip("/").split("/")[-1]
-    print(f"[serve] loading {a.model} (drafter {a.drafter}) ...", file=sys.stderr, flush=True)
+    if a.qmm:  # SpecModel reads it when Runner builds the model
+        os.environ["SPECDEC_QMM"] = a.qmm
+    print(f"[serve] loading {a.model} (drafter {a.drafter}, qmm {os.environ.get('SPECDEC_QMM') or 'off'}) ...", file=sys.stderr, flush=True)
     worker = Worker(lambda: build_engine(a.model, a.drafter, a.max_context, a.snapshots,
                                          warmup=not a.no_warmup))
     defaults = SamplingParams(a.temp, a.top_k, a.top_p, a.min_p)

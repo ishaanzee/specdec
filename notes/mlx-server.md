@@ -50,3 +50,13 @@ the GDN recurrence (as rollback does) -> `Engine._prefill`, `_mid_state`.
   diagnose the logit margin there like overhead.py does.
 - Run ended with the server stopped (SIGTERM) before the sampling section;
   results/mlx_server_smoke.json not rewritten by this run.
+
+## Turn-3 divergence: bf16 near-tie (2026-10-11, logs/server_turn3_diag.log, AC)
+Engine-only repro of the 3-turn test: turns 1-2 identical with/without reuse
+(2061 / 2288 tokens cached), turn 3 diverges at generated token 22: reuse picks
+3315, fresh picks 413. One-pass recompute: 24.625 / 24.5 (one bf16 ulp);
+token-by-token: 413, 3315 and 279 all exactly 24.5. Numerics, not a cache
+bug (the CPU fp32 tests show reuse == fresh, mutation-checked).
+
+`--qmm 5-16` added to `serve` (sets SPECDEC_QMM before SpecModel is built);
+not yet exercised on the 27B through the server.

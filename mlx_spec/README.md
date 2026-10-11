@@ -89,7 +89,9 @@ Options: `--model` (MLX dir or HF id, default `mlx-community/Qwen3.8-27B-4bit`),
 `--drafter` (any config string from the CLI above, e.g. `mtp:k=3:vocab=65536`
 (default), `mtp:k=2`, `ngram:k=3`, `draft:k=3`, or `none`), `--port` (8081),
 `--host` (127.0.0.1; use 0.0.0.0 for other devices on the LAN),
-`--max-context` (32768 tokens, prompt + output), `--alias` (model id shown by
+`--max-context` (32768 tokens, prompt + output), `--qmm 5-16` (route
+verify passes of 5-16 rows through the small-batch quantized matmul in
+`qmm_kernel.py`, same as env `SPECDEC_QMM`; off by default), `--alias` (model id shown by
 `/v1/models`), `--snapshots` (prompt-cache snapshots, 6), and default sampling
 settings `--temp 0.8 --top-k 40 --top-p 0.95 --min-p 0.05` (llama-server's
 defaults, used when a request doesn't set them).
@@ -172,6 +174,15 @@ every turn, and the server reuses what it already computed:
 - The MTP head's own KV cache is trimmed to the reused prefix. Missing
   (hidden, token) pairs are fed from the stored target hidden states, so
   drafting is the same as after a fresh prefill.
+
+The prompt is prefilled in the same chunks as the CLI, so a fresh request
+gives the CLI's exact output (27B smoke: 6/6 bench prompts identical). The
+snapshot before the generation prompt is taken mid-chunk by replaying the
+recurrence, the same mechanism as rollback. With reuse in bf16, the cached
+prefix was computed in different batch shapes, so a near-tie can flip. One
+was seen in the 27B 3-turn test: turn 3 diverged at token 22, where the
+top-2 logits were 24.625 / 24.5 in one pass and exactly tied step by step
+(`logs/server_turn3_diag.log`).
 
 When the app sends the history back verbatim, the next turn prefills only
 the new user message. With thinking on, apps usually drop the reasoning, so
