@@ -139,7 +139,33 @@ All variants pass test-backend-ops MUL_MAT (234/234; sabotage check confirms cov
    `e2e-stock` (all record the power source; only compare within a session/power state; e2e is --paired).
 
 
-## Forward cost, llama-bench -p B -n 0 (-fa 1 -ngl 999), B = 1..17 — TODO
+## Forward cost, llama-bench -p B -n 0 (-fa 1 -ngl 999), B = 1..17
+
+`scripts/gpu.py bench/llama_multirow_sweep.sh kbench`, 2026-10-11 17:18, AC power, same binary, stock / multirow
+alternating twice (rounds agree within 1%; log `logs/llama_multirow_kbench_ppl.log`). ms per forward = 1000*B/(tok/s),
+mean of the two rounds. Default per-type table (MMA kernel: Q4_K/Q6_K B >= 4, Q8_0 B = 5..8; stock path elsewhere).
+
+| B | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 12 | 14 | 16 | 17 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| stock ms | 149 | 158 | 207 | 298 | 416 | 429 | 528 | 573 | 379 | 380 | 382 | 384 | 382 | 383 |
+| multirow ms | 148 | 157 | 207 | 243 | 270 | 277 | 277 | 280 | 328 | 333 | 335 | 342 | 347 | 383 |
+| change | 0 | 0 | 0 | -18% | -35% | -35% | -48% | -51% | -13% | -12% | -12% | -11% | -9% | 0 |
+
+A 5..8-token verify forward now costs 1.8-1.9x a 1-token forward instead of 2.8-3.8x. (llama-bench pp only computes
+logits for the last token, so the LM head runs at B=1 here; in speculative verification it runs at B, where the MMA
+kernel helps even more: 248320x5120 Q6_K at B=8 is 10 ms vs 43 ms stock.)
+
+## Perplexity (wikitext-2 test, -c 128 -b 128, 24 chunks)
+
+| ubatch | stock | multirow | diff |
+|---|---:|---:|---:|
+| 16 | 9.5565 | 9.5523 | -0.0042 (-4.4e-4 rel.) |
+| 5 | 9.5574 | 9.5523 | -0.0051 (-5.3e-4 rel.) |
+
+(+/- 0.66 statistical error.) Within the ~1e-3 relative target. Part of the difference is that the MMA kernel rounds
+weights and activations to half before multiplying (as the stock mat-mat kernel does for B >= 9; the stock mat-vec
+kernels at B <= 8 are all-f32). Note stock ub=16 and ub=5 differ from each other by 0.0009 as well.
+
 
 ## End-to-end (bench/llama_bench.py --paired via bench/llama_bench_server.py) — TODO
 
