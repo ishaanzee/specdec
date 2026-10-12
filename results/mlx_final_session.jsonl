@@ -1,0 +1,7 @@
+{"experiment": "final_session", "stage": "load", "power": "AC Power", "loadavg": 6.8, "time": "2026-10-11 14:35:15", "target": "models/qwen38-27b-q4km-mlx"}
+{"experiment": "final_session", "stage": "bench done", "power": "AC Power", "loadavg": 3.7, "time": "2026-10-11 15:17:23", "target": "models/qwen38-27b-q4km-mlx"}
+{"experiment": "final_session", "stage": "diagnose done", "power": "AC Power", "loadavg": 4.24, "time": "2026-10-11 15:32:27", "target": "models/qwen38-27b-q4km-mlx"}
+{"experiment": "final_session", "stage": "load", "power": "AC Power", "loadavg": 4.24, "time": "2026-10-11 15:32:27", "target": "mlx-community/Qwen3.8-27B-4bit"}
+{"experiment": "final_session", "stage": "load", "power": "AC Power", "loadavg": 4.04, "time": "2026-10-11 16:37:57", "target": "mlx-community/Qwen3.8-27B-4bit"}
+{"experiment": "final_session", "stage": "bench done", "power": "AC Power", "loadavg": 1.81, "time": "2026-10-11 17:05:58", "target": "mlx-community/Qwen3.8-27B-4bit"}
+{"experiment": "final_session", "stage": "diagnose done", "power": "AC Power", "loadavg": 1.38, "time": "2026-10-11 17:12:53", "target": "mlx-community/Qwen3.8-27B-4bit"}

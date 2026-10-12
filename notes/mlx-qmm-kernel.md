@@ -1,5 +1,7 @@
 # A small-batch quantized matmul for MLX verify passes
 
+**Headline (s.9):** MTP k=7 + this kernel: 18.3 tok/s on the Q4_K_M transcode (3.25x its greedy, +20% over k=3), 28.3 on mlx-community 4-bit (3.23x).
+
 **Summary.** MLX 0.32.3's `quantized_matmul` on the M3 Pro runs 2-12 rows
 with `qmv_wide`, which cuts M into tiles of <= 5 vectors that each re-read and
 re-dequantize all weights with scalar FMAs, and 13+ rows with a 32-row MMA
@@ -294,6 +296,65 @@ MLX's rules on AI-written PR text):
   per call fixed cost, same as `quantized_matmul`), threadgroup memory is
   declared inside the body; so no MLX rebuild was needed to prototype this
   (step 5 of the brief did not trigger).
+
+## 9. Headline numbers: Q4_K_M transcode vs mlx-community 4-bit (2026-10-11)
+
+One GPU-lock job per target, back to back, AC power, memory free 80-87% at
+start (`results/mlx_final_session.jsonl`, `logs/final_session*.log`), greedy,
+256 tokens, six prompts, `--repeat 2` (median; every repeat pair agreed within
+~2%) plus one profiled run. The first attempt loaded both models in one process:
+the transcode's memory was not released and the mlx-community runs from k = 4
+on swapped (2 tok/s); those rows were dropped and mlx-community re-run in its
+own process 30 min later (`bench/mlx_final_pipeline2.sh`). Kernel routing
+5-16 rows, N >= 256.
+
+| config | Q4_K_M transcode (21 GB) | mlx-community 4-bit g64 (15 GB) |
+|---|---|---|
+| greedy | 5.63 | 8.77 |
+| MTP k=3 vocab 65536, MLX kernels | 15.25 (2.71x) | 23.69 (2.70x) |
+| MTP k=4 + qmm | 16.08 | 24.56 |
+| MTP k=5 + qmm | 16.62 | 26.12 |
+| MTP k=6 + qmm | 17.19 | 26.74 |
+| **MTP k=7 + qmm** | **18.30 (3.25x, +20% vs k=3)** | **28.31 (3.23x, +19.5% vs k=3)** |
+| 0.8B draft k=6 + qmm | 15.27 | 22.46 |
+
+Verify ms per round (profiled run): transcode 187 at k=3, 195-202 at k=4-7;
+mlx-community 121 at k=3, 125-127 at k=4-7.
+
+Per prompt, MTP k=7 + qmm (code_edit / code_gen / summarize / prose / explain / math):
+transcode 26.2 / 22.8 / 16.6 / 9.6 / 13.3 / 21.3; mlx-community
+41.9 / 31.1 / 27.6 / 15.1 / 24.8 / 29.4. Prose is the one prompt where k=3
+is better (transcode 10.5 vs 9.6, mlx-community 16.8 vs 15.1).
+
+Output equivalence (bf16, `results/mlx_qmm_diagnose.jsonl`): matches greedy on
+2-4/6 prompts per config (transcode draft k=6: 1/6), the same counts MLX's own
+kernels give at k=3. Every divergence was diagnosed: all one-bf16-ulp
+near-ties (margins 0.125 / 0.0 / -0.125) except transcode prose @ token 2,
+single-step margin 0.25 and batched margin 0.0, which happens identically with
+MLX's own kernels at k=3 (no qmm), so it is not the kernel; 0.25 is one ulp
+if that logit is >= 32 (not checked).
+
+**Server** (`tests/smoke_server_27b.py`, `SPECDEC_QMM=5-16`, transcode,
+`--drafter mtp:k=7:vocab=65536:qmm=5-16`; results
+`results/mlx_server_smoke_q4km_qmm_rerun.json`, `logs/final_smoke2.log`): text
+identical to the CLI on 6/6 prompts; 20.2 tok/s mean as the server reports it
+(CLI 18.3; the server's tok/s excludes prompt/first-token time). Streaming ==
+non-streaming, thinking split, seeded sampling all OK. The smoke's prompt-cache
+check differs at char 153 of turn 2 between cached and uncached prefill: that
+path appends 28 tokens (MLX kernels, > 16 rows) vs a 2089-token prefill, a
+batching near-tie, not the kernel. (A first smoke run right after the swap
+episode was slow, 5.2 tok/s, from paging; the last prompt already ran at
+CLI speed; same 6/6 text.)
+
+Recommended:
+
+```
+SPECDEC_QMM=5-16 scripts/gpu.py .venv/bin/python -m mlx_spec serve \
+  --model models/qwen38-27b-q4km-mlx --drafter mtp:k=7:vocab=65536
+```
+(18.3 tok/s CLI / ~20 tok/s server-reported on llama.cpp-equal quality; the
+mlx-community 4-bit file does 28.3 with the same flags but is a lower-quality
+quant.)
 
 ## Reproduce
 
