@@ -54,6 +54,14 @@ case "${1:-}" in
       BS 1 draft-mtp,ngram-simple mr-mtp-n$n+ngs -- -md $MTP_Q4 --spec-type draft-mtp,ngram-simple --spec-draft-n-max $n
     done
     ;;
+  e2e-mtp2)
+    # longer MTP chains (the trend was still rising at n_max 6)
+    for n in 7 8 10; do
+      BS 1 draft-mtp mr-mtp-n$n -- -md $MTP_Q4 --spec-type draft-mtp --spec-draft-n-max $n
+    done
+    BS 1 draft-mtp,ngram-simple mr-mtp-n8+ngs -- -md $MTP_Q4 --spec-type draft-mtp,ngram-simple --spec-draft-n-max 8
+    BS 1 draft-mtp mr-mtp-n8-pmin0.3 -- -md $MTP_Q4 --spec-type draft-mtp --spec-draft-n-max 8 --spec-draft-p-min 0.3
+    ;;
   e2e-dflash)
     for n in 3 4 5 6 7; do
       BS 1 draft-dflash mr-dflash-n$n -- -md $DF_Q4 --spec-type draft-dflash --spec-draft-n-max $n
@@ -70,5 +78,5 @@ case "${1:-}" in
     BS 0 draft-dflash,ngram-simple stock-dflash-n7+ngs -- -md $DF_Q4 --spec-type draft-dflash,ngram-simple --spec-draft-n-max 7
     ;;
   *)
-    echo "usage: $0 kbench|ppl|e2e-mtp|e2e-dflash|e2e-draft|e2e-stock"; exit 1 ;;
+    echo "usage: $0 kbench|ppl|e2e-mtp|e2e-mtp2|e2e-dflash|e2e-draft|e2e-stock"; exit 1 ;;
 esac
