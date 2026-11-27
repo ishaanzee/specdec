@@ -3,10 +3,10 @@
 # Run one phase per GPU-lock session:  scripts/gpu.py bench/llama_ngram_sweep.sh <phase>
 # (Don't edit this file while a phase is running: bash reads scripts lazily. Run a copy.)
 set -u
-cd /Users/ishaanmehta/Documents/specdec
-M=/Users/ishaanmehta/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snapshots/efbb3b1f70a21d97fd4495240648405f7228554f/Qwen3.8-27B-Q4_K_M.gguf
-D08=/Users/ishaanmehta/.cache/huggingface/hub/models--ggml-org--Qwen3.5-0.8B-GGUF/snapshots/8fea620810c4afa23dd6443f999a48574c1611a3/Qwen3.5-0.8B-Q8_0.gguf
-D2=$(ls /Users/ishaanmehta/.cache/huggingface/hub/models--unsloth--Qwen3.5-2B-GGUF/snapshots/*/Qwen3.5-2B-Q8_0.gguf 2>/dev/null | head -1)
+cd "$(dirname "$0")/.."
+M=$HOME/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snapshots/efbb3b1f70a21d97fd4495240648405f7228554f/Qwen3.8-27B-Q4_K_M.gguf
+D08=$HOME/.cache/huggingface/hub/models--ggml-org--Qwen3.5-0.8B-GGUF/snapshots/8fea620810c4afa23dd6443f999a48574c1611a3/Qwen3.5-0.8B-Q8_0.gguf
+D2=$(ls $HOME/.cache/huggingface/hub/models--unsloth--Qwen3.5-2B-GGUF/snapshots/*/Qwen3.5-2B-Q8_0.gguf 2>/dev/null | head -1)
 EXP=llama-ngram-draft
 B() { # B <method> <config> <repeat> [harness opts] -- server args...
   local method=$1 cfg=$2 rep=$3; shift 3

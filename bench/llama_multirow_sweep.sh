@@ -5,10 +5,10 @@
 # GGML_METAL_MV_MULTIROW=1 turns the new kernels on; unset = the stock code path of the same binary.
 set -u
 cd "$(dirname "$0")/.."
-M=/Users/ishaanmehta/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snapshots/efbb3b1f70a21d97fd4495240648405f7228554f/Qwen3.8-27B-Q4_K_M.gguf
+M=$HOME/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snapshots/efbb3b1f70a21d97fd4495240648405f7228554f/Qwen3.8-27B-Q4_K_M.gguf
 DF_Q4=models/Qwen3.8-27B-DFlash2-q4_0.gguf
 MTP_Q4=models/mtp-Qwen3.8-27B-q4_0.gguf
-D08=/Users/ishaanmehta/.cache/huggingface/hub/models--ggml-org--Qwen3.5-0.8B-GGUF/snapshots/8fea620810c4afa23dd6443f999a48574c1611a3/Qwen3.5-0.8B-Q8_0.gguf
+D08=$HOME/.cache/huggingface/hub/models--ggml-org--Qwen3.5-0.8B-GGUF/snapshots/8fea620810c4afa23dd6443f999a48574c1611a3/Qwen3.5-0.8B-Q8_0.gguf
 BIN=vendor/llama.cpp/build-multirow/bin
 EXP=${EXP:-llama-multirow}
 REP=${REP:-1}

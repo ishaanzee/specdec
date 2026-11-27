@@ -5,7 +5,7 @@ Only one model fits in memory at a time and parallel runs ruin timings, so every
 command that loads a model goes through here: scripts/gpu.py <cmd> [args...]
 
 Waiters are served first come, first served (a ticket queue in QUEUE_DIR), and the
-lock is not taken while the user's own model server is running (any llama-server or
+lock is not taken while another model server is running (any llama-server or
 `mlx_spec serve` process that isn't ours), since that already uses most of memory.
 Set SPECDEC_IGNORE_FOREIGN=1 to skip that check.
 """

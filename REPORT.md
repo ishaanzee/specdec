@@ -6,7 +6,7 @@ All numbers are generation tok/s: greedy decoding, thinking off, 256 new tokens,
 
 | Engine | Setup | tok/s | vs 6.64 | Quality |
 |---|---|---|---|---|
-| llama.cpp | what you ran before (ggml-org Q4_K_M) | 6.64 | 1.00x | reference |
+| llama.cpp | no speculation (ggml-org Q4_K_M) | 6.64 | 1.00x | reference |
 | llama.cpp | MTP n2 + ngram-simple, stock build | 11.39 | 1.71x | identical output 6/6 |
 | llama.cpp | **patched kernel, DFlash2 n7 + ngram-simple** | **14.13** | **2.13x** | PPL same to 5e-4; 5/6 identical (one near-tie) |
 | llama.cpp | patched kernel, MTP n7 (no DFlash file needed) | 13.07 | 1.97x | same |
@@ -25,11 +25,11 @@ All numbers are generation tok/s: greedy decoding, thinking off, 256 new tokens,
 **Most speed at unchanged quality: the MLX server** (OpenAI-compatible, port 8081). Stop llama-server first, since two 27B models don't fit in 36 GB.
 
 ```
-cd ~/Documents/specdec && scripts/gpu.py .venv/bin/python -m mlx_spec serve \
+scripts/gpu.py .venv/bin/python -m mlx_spec serve \
   --model models/qwen38-27b-q4km-mlx --drafter mtp:k=7:vocab=65536 --qmm 5-16
 ```
 
-Point the chat app at `http://127.0.0.1:8081/v1`; any API key works.
+Point a chat app at `http://127.0.0.1:8081/v1`; any API key works.
 - **Correctness:** text is identical to the CLI on 6/6 prompts.
 - **Speed:** about 20 tok/s as the server reports it.
 - **Features:**
@@ -44,16 +44,16 @@ Point the chat app at `http://127.0.0.1:8081/v1`; any API key works.
 **Staying on llama.cpp:** use the patched build.
 
 ```
-GGML_METAL_MV_MULTIROW=1 ~/Documents/specdec/vendor/llama.cpp/build-multirow/bin/llama-server \
+GGML_METAL_MV_MULTIROW=1 vendor/llama.cpp/build-multirow/bin/llama-server \
   -m <ggml-org Qwen3.8-27B-Q4_K_M.gguf> \
-  -md ~/Documents/specdec/models/Qwen3.8-27B-DFlash2-q4_0.gguf \
+  -md models/Qwen3.8-27B-DFlash2-q4_0.gguf \
   --spec-type draft-dflash,ngram-simple --spec-draft-n-max 7 -ngl 999 -fa on -c 8192 --jinja
 ```
 
 For byte-identical output with a stock build, use the round-1 command (MTP n2, 11.4 tok/s):
 
 ```
-llama-server -m <Q4_K_M.gguf> -md ~/Documents/specdec/models/mtp-Qwen3.8-27B-q4_0.gguf \
+llama-server -m <Q4_K_M.gguf> -md models/mtp-Qwen3.8-27B-q4_0.gguf \
   --spec-type draft-mtp,ngram-simple --spec-draft-n-max 2 -ngl 999 -fa on -c 8192 --jinja
 ```
 
@@ -100,7 +100,7 @@ Qwen3.8's chat template defaults to thinking at `reasoning_effort: xhigh`. For e
 
 ## Upstream
 
-Both kernels could become upstream contributions. Porting notes are written for you, not as PR text (MLX bans AI-written commit and PR text).
+Both kernels could become upstream contributions. The porting notes list what each one would need first.
 
 - **MLX** (`notes/mlx-qmm-kernel.md` s.8):
   - Replace `qmv_wide` and the 32-row tile for 5 ≤ M ≤ 16 on gen ≥ 15 GPUs.
@@ -130,15 +130,8 @@ Both kernels could become upstream contributions. Porting notes are written for 
 | `notes/llama-metal-kernel.md` | llama.cpp kernel root cause, patch, end-to-end results |
 | `results/` | raw rows (`mlx_final_session.jsonl`, `llama-multirow.jsonl`, `quality_ppl.jsonl`, ...) |
 
-## Housekeeping
+## Notes on the setup
 
-- **Models:**
-  - `models/qwen38-27b-q4km-mlx`: 20 GB, the transcode, used by the server.
-  - DFlash2 bf16/q8/q4, MTP q4/q8, a 19 GB single-file Q4_K_M+MTP, and the MLX MTP weights.
-  - `models/wikitext/q4km-base.kld` (8.1 GB) was only needed for the KL comparison and can be deleted.
-- **Disk:** ~67 GB free.
-- **`vendor/llama.cpp`:**
-  - `build-multirow/` is the patched build used above.
-  - `build-mm/` is the round-1 experiment, superseded.
-- **`scripts/gpu.py`** is the machine-wide GPU queue; it waits while your own llama-server or `mlx_spec serve` runs.
-- Nothing has been pushed anywhere.
+- `vendor/llama.cpp` (not in the repo) is a llama.cpp checkout at `b29c606e2` with `scripts/metal-multirow-mv.patch` applied, built into `build-multirow/`.
+- `models/` (not in the repo) holds the transcode (20 GB), the DFlash2 and MTP GGUFs, and the MLX MTP weights. `scripts/` rebuilds all of them.
+- `scripts/gpu.py` is a machine-wide GPU lock. Every benchmark runs through it, and it waits while a server is running.

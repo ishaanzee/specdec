@@ -25,7 +25,7 @@ Code: `mlx_spec/qmm_kernel.py` (kernel + opt-in hook), `mlx_spec/qmm_tuned.json`
 
 ## 1. Why MLX 0.32.3 has a staircase above 4 rows
 
-Source read: the `v0.32.3` tag of `~/Documents/oss/mlx` (the installed wheel is
+Source read: the `v0.32.3` tag of a local MLX checkout (the installed wheel is
 0.32.3; the checkout itself is `v0.32.3-59-ga7e00f130` on a feature branch, and
 none of the 59 commits change the M3 path: they touch the M1 row limit and the
 `qmv_fast` partial-rows case). Files: `mlx/backend/metal/quantized.cpp`
@@ -209,14 +209,14 @@ MLX (in line with the microbenchmark), hence the final range 5-16.
 
 (The kernel row is the 10:24 session with routing 2-16 and in_proj_a/b still
 routed, before `min_n`; a re-run at 13:37 with the final 5-16 range was
-disturbed by the user working on the machine (MLX's own T = 6 came out at
+disturbed by other use of the machine (MLX's own T = 6 came out at
 275 ms instead of 179) and is not used for the curve; its rows are in the same
 file. The end-to-end per-round verify times below confirm the curve.)
 
 ## 6. End to end (`bench/mlx_qmm_session.py`)
 
 Session 2026-10-10 13:37-15:00, **AC power** throughout (`results/mlx_qmm_session.jsonl`),
-GPU lock held, but the user was using the Mac (WindowServer, Chrome, Music,
+GPU lock held, but the Mac was in normal use (WindowServer, Chrome, Music,
 Ollama app open), so absolute numbers are ~5-9% below the overnight runs
 (MTP k=3 21.0 vs 23.0 tok/s then) and run-to-run noise is ~3% (the k = 3 pairs
 below are the same computation with and without the hook: 20.99 / 21.10 and
@@ -280,8 +280,7 @@ Yes, as a change to MLX's small-batch dispatch on gen >= 15 GPUs: replacing
 `qmv_wide` (tiles of <= 5 vectors) and the 32-row `qmm` for 5 <= M <= 16 with
 an MMA kernel that keeps all M rows in one pass. On this M3 Pro it turns the
 2.9x verify plateau into 1.0x for T <= 8 and 1.5x for T <= 16, and it is
-what makes k = 7 the best draft length. Notes for a port (no PR text, per
-MLX's rules on AI-written PR text):
+what makes k = 7 the best draft length. Notes for a port:
 
 * The kernel is self-contained: `_source_mma` + `_MMA_HEADER` map 1:1 onto a
   `qmv_mma` template in `kernels/quantized.h` (templated on T, group_size,
@@ -369,8 +368,8 @@ scripts/gpu.py .venv/bin/python -m mlx_spec bench --configs mtp:k=7:vocab=65536:
 ## Status of measurements (preliminary sections)
 
 Sections 1-2's synthetic-shape numbers are **preliminary**: synthetic shapes (4096-16384 wide), run
-while the GPU lock was unavailable (the user's own llama-server was up, idle,
-sharing the GPU; another agent's CPU-heavy transcode check was also running),
+while the GPU lock was unavailable (a llama-server was up, idle,
+sharing the GPU; a CPU-heavy transcode check was also running),
 power source not recorded (the Mac was later found on battery, so treat these
 as suspect). The real-shape microbenchmark, tuning, verify-cost curve and
 end-to-end runs are queued as one GPU-lock job (`bench/mlx_qmm_pipeline.sh`)

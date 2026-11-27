@@ -290,7 +290,7 @@ one profiled run per prompt (greedy, ngram k=3 and draft k=3: median of 2,
 re-run in a later session; the two repeats agree within 1% and with the
 earlier single runs within 1-4%) (the profiled run adds a sync per phase and gives
 the time split; its tok/s is within a few % of the timed run). Load average
-(other agents' CPU work) is recorded per row (`loadavg`, 2-4). Rows:
+(other jobs' CPU work) is recorded per row (`loadavg`, 2-4). Rows:
 `results/mlx_{greedy,spec-none,ngram,draft,hybrid}.jsonl`; regenerate this
 table with `.venv/bin/python -m mlx_spec summary`.
 
@@ -548,7 +548,7 @@ Reading it:
 
 * A run on a busy machine is worthless: the first benchmark pass (session 1)
   overlapped the end of the 54 GB bf16 download (greedy 7.3 tok/s instead of
-  8.56) and then another agent's torch job; n-gram rounds suddenly cost
+  8.56) and then another job running torch; n-gram rounds suddenly cost
   210 ms instead of 125 ms. Those rows were discarded
   (`logs/contaminated/`), and rows now record `loadavg`.
 * `mlx_lm.load` checks the Hub for updates; once a stalled TLS handshake hung a

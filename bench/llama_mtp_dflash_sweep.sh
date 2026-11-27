@@ -3,7 +3,7 @@
 # Run one phase per GPU-lock session:  scripts/gpu.py bench/llama_mtp_dflash_sweep.sh <phase>
 set -u
 cd "$(dirname "$0")/.."
-M=/Users/ishaanmehta/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snapshots/efbb3b1f70a21d97fd4495240648405f7228554f/Qwen3.8-27B-Q4_K_M.gguf
+M=$HOME/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snapshots/efbb3b1f70a21d97fd4495240648405f7228554f/Qwen3.8-27B-Q4_K_M.gguf
 DF_BF16=models/Qwen3.8-27B-DFlash2-bf16.gguf
 DF_Q8=models/Qwen3.8-27B-DFlash2-q8_0.gguf
 DF_Q4=models/Qwen3.8-27B-DFlash2-q4_0.gguf
@@ -51,7 +51,7 @@ case "${1:-}" in
     ;;
   mtp-own-convert)
     # our own MTP sidecar from the official HF weights (only shards 3, 16, 18 are actually read)
-    Q=$(echo /Users/ishaanmehta/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/*)
+    Q=$(echo $HOME/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/*)
     .venv/bin/python vendor/llama.cpp/convert_hf_to_gguf.py $Q --mtp --outtype bf16 \
         --model-name Qwen3.8-27B --outfile $MTP_OWN_BF16
     llama-quantize $MTP_OWN_BF16 $MTP_OWN Q8_0

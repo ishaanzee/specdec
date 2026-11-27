@@ -9,7 +9,7 @@ same top-1 token 98.0 % of the time. mlx-community's 4-bit scores **6.275**
 outputs match llama.cpp's text exactly on 4 of 6 prompts, and the other 2
 diverge at exact or one-ulp ties. The price is speed: the file is 31 % bigger,
 so greedy drops from 8.42 to 5.71 tok/s and MTP k=3 from 18.45 to 15.76 tok/s
-(same session, on AC, but with other agents' CPU load). That is still 1.4x
+(same session, on AC, but with other jobs' CPU load). That is still 1.4x
 llama.cpp's best (11.4 tok/s) on the same weights.
 
 ## Why
@@ -178,7 +178,7 @@ gives our model's single-step logit margin at the first differing token:
 ### Speed (`bench/mlx_matched_quant.py`, `results/mlx_matched_quant.jsonl`)
 
 `Runner.bench`, 6 prompts, 256 tokens, median of 2 runs, both models in one
-session on AC power. Other agents' CPU jobs were running (load average 3.5-7),
+session on AC power. Other CPU jobs were running (load average 3.5-7),
 so absolute numbers are below the clean Track B session: mlx-community's
 MTP k=3 gives 18.45 here vs 23.02 before, and its verify round is 170 ms vs
 125 ms. The ratio between the two models is the useful number.
@@ -201,7 +201,7 @@ A clean rerun (quiet machine, AC) should be done before quoting absolute tok/s.
 ## Recommendation
 
 * Use `models/qwen38-27b-q4km-mlx` as the MLX target when quality matters. It is
-  the user's llama.cpp model, at llama.cpp's perplexity to within 0.14 %, and with
+  the llama.cpp model, at llama.cpp's perplexity to within 0.14 %, and with
   MTP k=3 it still runs ~1.4x faster than llama.cpp's best config on the same
   weights (15.8 vs 11.4 tok/s, this session's conditions).
 * mlx-community's 4-bit is measurably worse (+2.5 % PPL, KL 0.068). Its speed

@@ -3,7 +3,7 @@
 
 Starts the server as a subprocess, runs the checks, stops the server (also on
 errors / Ctrl-C). Run it under the GPU lock as ONE command, so gpu.py doesn't
-mistake our own server for the user's:
+mistake our own server for one that was already running:
 
     scripts/gpu.py .venv/bin/python tests/smoke_server_27b.py [--model ...] [--drafter ...]
 

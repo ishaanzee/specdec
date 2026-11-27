@@ -42,8 +42,8 @@ Raw rows: `results/llama-ngram-draft.jsonl`. Tables: `.venv/bin/python bench/lla
 * Output check: sha256 of `message.content` vs `results/baseline_outputs/Qwen3.8-27B-Q4_K_M/<prompt>.txt`
   (saved from the `--spec-type none` run, identical across its 3 repeats). Differing outputs are saved
   under `results/mismatch_outputs/`.
-* **The machine was shared all night** (other agents queued on the GPU lock, plus unrelated
-  ffmpeg / OCR / Python jobs of the user's, 8-10 GB of swap in use). The same no-spec config measured
+* **The machine was shared all night** (other jobs queued on the GPU lock, plus unrelated
+  ffmpeg / OCR / Python jobs, 8-10 GB of swap in use). The same no-spec config measured
   6.5 tok/s at 00:30, 5.0 tok/s at 02:00 and 3.6 tok/s at 03:30, then 6.6-6.7 again from ~04:00.
   So the phase-1 screening numbers (unpaired) are only comparable within a few minutes of each other.
   From phase 2 on, every run is **paired** (`--paired`): each candidate run of a prompt sits right next

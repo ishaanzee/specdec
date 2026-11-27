@@ -124,7 +124,7 @@ tensors (Q8_0; the sidecar's own `token_embd`/`output`/`output_norm` are dropped
 sets `qwen35.block_count=65`, `qwen35.nextn_predict_layers=1`, `qwen35.attention.recurrent_layers` (65 entries).
 This is exactly what `convert_hf_to_gguf.py` (without `--no-mtp`) + ggml-org's quantize recipe would give for the
 trunk, with the MTP block at Q8_0 instead of Q4_K (their recipe would make `ffn_*`/`eh_proj` Q4_K and `attn_*` Q8_0).
-If you have the disk, the from-scratch equivalent is:
+With enough disk, the from-scratch equivalent is:
 
 ```bash
 convert_hf_to_gguf.py $Q --outtype bf16 --outfile Qwen3.8-27B-mtp-BF16.gguf          # 54 GB, MTP kept by default
@@ -267,7 +267,7 @@ decompressing on the CPU and has no in-session reference; it is ~15% low compare
 
 ```bash
 llama-server -m ~/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snapshots/efbb3b1f70a21d97fd4495240648405f7228554f/Qwen3.8-27B-Q4_K_M.gguf \
-    -md ~/Documents/specdec/models/mtp-Qwen3.8-27B-q4_0.gguf \
+    -md models/mtp-Qwen3.8-27B-q4_0.gguf \
     --spec-type draft-mtp,ngram-simple --spec-draft-n-max 2 \
     -ngl 999 -fa on -c 8192 --jinja
 ```
@@ -316,7 +316,7 @@ This is a local hack (not upstreamed); an upstream fix would be a better small-b
   peak and there were 47 GB free after the downloads; the splice gives the same trunk byte-for-byte.
 * `scripts/gpu.py` opens the lock file with "w", which truncates the holder's "pid cmd" line whenever another
   process starts waiting, so the lock file is always empty; use `lsof /tmp/specdec-gpu.lock` + child processes
-  to see who holds it. flock is not FIFO: waits of 1-1.5 h were common with 4-5 agents queued.
+  to see who holds it. flock is not FIFO: waits of 1-1.5 h were common with 4-5 jobs queued.
 * `pgrep -f '<pattern>'` in a wait loop matches the waiting shell itself (its command line contains the
   pattern) -> infinite wait. Match on something the loop's own command line doesn't contain.
 * The `mtp-ggml` sweep ran while `hf download` was decompressing the 54 GB checkpoint: all its tok/s are ~15% low.

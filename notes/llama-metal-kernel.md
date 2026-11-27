@@ -292,9 +292,9 @@ Findings:
 ## Best command (patched build)
 
 ```bash
-GGML_METAL_MV_MULTIROW=1 ~/Documents/specdec/vendor/llama.cpp/build-multirow/bin/llama-server \
+GGML_METAL_MV_MULTIROW=1 vendor/llama.cpp/build-multirow/bin/llama-server \
   -m ~/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF/snapshots/efbb3b1f70a21d97fd4495240648405f7228554f/Qwen3.8-27B-Q4_K_M.gguf \
-  -md ~/Documents/specdec/models/Qwen3.8-27B-DFlash2-q4_0.gguf \
+  -md models/Qwen3.8-27B-DFlash2-q4_0.gguf \
   --spec-type draft-dflash,ngram-simple --spec-draft-n-max 7 \
   -ngl 999 -fa on -c 8192 --jinja
 ```
@@ -310,10 +310,10 @@ cmake --build build-multirow -j 10 -t llama-server llama-bench llama-perplexity 
 MTP alternative (no DFlash sidecar needed): the same command with `-md models/mtp-Qwen3.8-27B-q4_0.gguf
 --spec-type draft-mtp --spec-draft-n-max 7`, 13.07 tok/s.
 
-## Upstream notes (for the user, not PR text)
+## Upstream notes
 
 * **What's upstreamable:** the MMA small-batch kernel plus its dispatch rule. The scalar multi-row kernel is not
-  worth upstreaming: it loses from B >= 5, and its only wins at B = 2-4 are small. If you upstream, drop it and the
+  worth upstreaming: it loses from B >= 5, and its only wins at B = 2-4 are small. For upstreaming, drop it and the
   env knobs, and make the MMA path the default for the measured (type, B) ranges. Gate it on the
   `has_simdgroup_mm && !has_tensor` path (pre-M5); M5's tensor-API mm has different trade-offs and was not measured.
 * **The upstream argument, in numbers:** stock Metal on an M3 Pro makes a 5-8-token forward 2.8-3.8x a 1-token
@@ -345,7 +345,7 @@ MTP alternative (no DFlash sidecar needed): the same command with `-md models/mt
 
 ## Gotcha found on the way
 
-`scripts/gpu.py` detects "the user's server" with `pgrep -f "llama-server|mlx_spec serve"`. Other agents' wait
+`scripts/gpu.py` detects an already-running model server with `pgrep -f "llama-server|mlx_spec serve"`. Other queued jobs' wait
 loops of the form `until ! pgrep -f "llama-server -m" ...` contain that string in their own command line, so
-they (a) never terminate and (b) keep gpu.py waiting even after the user's real server exits. If the queue
+they (a) never terminate and (b) keep gpu.py waiting even after the real server exits. If the queue
 stays blocked with no real `llama-server` binary running, check `pgrep -fl llama-server` for zsh wrappers.
